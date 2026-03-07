@@ -60,12 +60,12 @@ PassCLI works in two ways:
 passcli get email/gmail              # show password + metadata
 passcli get email/gmail --clip       # copy to clipboard (auto-clears after 45s)
 passcli get email/gmail --field url  # print just one field
-passcli insert web/github            # add new entry (guided prompts)
-passcli generate web/github 24       # generate 24-char password
+passcli insert web/github            # add new entry (guided prompts, auto-generate option)
+passcli generate web/github 24       # generate 24-char password (shows password + strength)
 passcli generate web/github --clip   # generate and copy to clipboard
 passcli edit web/github              # open in $EDITOR
-passcli delete web/github            # delete (asks for confirmation)
-passcli find gmail                   # search entries by name
+passcli delete web/github            # delete (previews entry, asks for confirmation)
+passcli find gmail                   # search entries by name (select and act on results)
 passcli ls                           # list all entries
 passcli mv web/github personal/gh    # move / rename
 passcli cp web/github web/github-bak # copy
@@ -79,7 +79,7 @@ passcli restore old-site             # restore from archive/
 passcli          # or: passcli shell
 ```
 
-The shell supports tab-completion for all entry names and persists history across sessions.
+The shell supports tab-completion for all entry names, persists history across sessions, and offers quick-copy prompts after displaying entries.
 
 ---
 
@@ -98,6 +98,21 @@ notes: work account
 The first line is always the password. All other fields are optional `key: value` pairs.
 This is compatible with `pass-import` and most pass extensions.
 
+### Inserting entries with auto-generate
+
+When adding a new entry, leave the password blank to auto-generate one:
+
+```bash
+passcli insert web/github
+# Password (Enter to generate): ↵
+# Length [20]:
+# Include symbols? [Y/n]:
+# Generated: xK#9mR!2pL@vQ8nW$3jF
+# Strength: █████ Very Strong
+```
+
+Password strength feedback is shown immediately after entering or generating a password.
+
 ### Password health report
 ```bash
 passcli health
@@ -106,6 +121,7 @@ Scans every entry and reports:
 - Strength score (Very Weak → Very Strong) with a visual bar
 - Length
 - Duplicate passwords across entries
+- Detailed tables for both **weak** and **fair** passwords, with actionable tips
 
 ### TOTP / OTP codes
 Store your OTP secret in an entry field:
@@ -165,20 +181,20 @@ Config is stored at `~/.config/passcli/config.json`.
 |---|---|
 | `get [entry] [--clip] [--field F]` | Show a password (or copy/field) |
 | `clip [entry]` | Copy to clipboard with auto-clear |
-| `insert [entry]` | Add new entry (guided structured input) |
-| `generate [entry] [len]` | Generate a random password |
+| `insert [entry]` | Add new entry (guided prompts, auto-generate option, strength feedback) |
+| `generate [entry] [len]` | Generate a random password (shows password + strength) |
 | `edit [entry]` | Edit in `$EDITOR` |
-| `delete [entry]` | Delete an entry |
-| `browse` | Fuzzy-pick entry and choose action |
+| `delete [entry]` | Delete an entry (previews metadata before confirming) |
+| `browse` | Fuzzy-pick entry, choose action (show/copy/username/URL/OTP/edit/delete) |
 | `ls` | List all entries |
-| `find <term>` | Search by name |
+| `find <term>` | Search by name (select and act on results) |
 | `mv <old> <new>` | Move / rename |
 | `cp <old> <new>` | Copy |
 | `archive [entry]` | Move to `archive/` |
 | `restore [entry]` | Restore from `archive/` |
 | `otp [entry]` | Generate TOTP code |
 | `run <entry> -- <cmd>` | Inject fields as env vars |
-| `health` | Strength + duplicate report |
+| `health` | Strength + duplicate report (shows weak and fair passwords) |
 | `import <file>` | Import from CSV |
 | `sync` | Git pull + push |
 | `gitlog [n]` | Git history |
@@ -187,6 +203,14 @@ Config is stored at `~/.config/passcli/config.json`.
 | `gpg_gen` | Generate GPG key |
 | `gpg_list` | List GPG keys |
 | `config [key] [value]` | View / set config |
+
+---
+
+## UX notes
+
+- **Contextual error messages** — errors distinguish between "entry not found", "GPG decryption failed", and "key errors" with suggested fixes.
+- **Fuzzy filtering without fzf** — when fzf is unavailable and you have 15+ entries, a text filter prompt narrows the list before showing numbers.
+- **Quick-copy in shell** — after viewing an entry in the interactive shell, press `c` to copy password, `u` for username, or `l` for URL.
 
 ---
 

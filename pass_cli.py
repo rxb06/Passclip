@@ -24,7 +24,9 @@ import hashlib
 import json
 import os
 import readline
+import secrets
 import shutil
+import string
 import subprocess
 import sys
 import threading
@@ -189,17 +191,25 @@ def fuzzy_select(entries: List[str], prompt_text: str = "Select entry") -> Optio
         except Exception:
             pass
 
-    # Fallback: numbered list
+    # Fallback: numbered list with optional text filter
+    filtered = entries
+    if len(entries) > 15:
+        term = Prompt.ask("[dim]Filter[/dim] (Enter for all)", default="")
+        if term:
+            filtered = [e for e in entries if term.lower() in e.lower()]
+            if not filtered:
+                console.print(f"[yellow]No entries matching '{term}'.[/yellow]")
+                return None
     table = Table(show_header=False, box=box.SIMPLE)
     table.add_column("#", style="dim", width=4)
     table.add_column("Entry", style="green")
-    for i, entry in enumerate(entries, 1):
+    for i, entry in enumerate(filtered, 1):
         table.add_row(str(i), entry)
     console.print(table)
     try:
-        choice = IntPrompt.ask(f"{prompt_text} (number)", default=0)
-        if 1 <= choice <= len(entries):
-            return entries[choice - 1]
+        choice = IntPrompt.ask(f"{prompt_text} (number, 0 to cancel)", default=0)
+        if 1 <= choice <= len(filtered):
+            return filtered[choice - 1]
     except (KeyboardInterrupt, ValueError):
         pass
     return None
@@ -310,8 +320,41 @@ def get_entry_raw(entry: str) -> Tuple[Optional[str], Optional[str]]:
     """Return (content, error). content is None on failure."""
     out, err, rc = run_command(["pass", "show", entry])
     if rc != 0 or not out:
-        return None, err or "Entry not found."
+        msg = err or ""
+        lower = msg.lower()
+        if "is not in the password store" in lower or (not msg and not out):
+            return None, f"Entry '{entry}' not found. Run [bold]ls[/bold] to see available entries."
+        if "decryption failed" in lower or "no secret key" in lower:
+            return None, f"Cannot decrypt '{entry}'. Is your GPG key unlocked? Try: gpg --card-status"
+        if "public key" in lower or "unusable public key" in lower:
+            return None, f"GPG key error for '{entry}'. Run [bold]gpg_list[/bold] to check your keys."
+        return None, msg or f"Entry '{entry}' not found."
     return out, None
+
+
+# ---------------------------------------------------------------------------
+# Password generation
+# ---------------------------------------------------------------------------
+
+
+def generate_password(length: int = 20, symbols: bool = True) -> str:
+    """Generate a cryptographically secure random password."""
+    alphabet = string.ascii_letters + string.digits
+    if symbols:
+        alphabet += string.punctuation
+    # Ensure at least one of each required character type
+    pw = [
+        secrets.choice(string.ascii_lowercase),
+        secrets.choice(string.ascii_uppercase),
+        secrets.choice(string.digits),
+    ]
+    if symbols:
+        pw.append(secrets.choice(string.punctuation))
+    pw += [secrets.choice(alphabet) for _ in range(length - len(pw))]
+    # Shuffle to avoid predictable positions
+    result = list(pw)
+    secrets.SystemRandom().shuffle(result)
+    return "".join(result)
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +403,7 @@ def cmd_get(
     entry: Optional[str] = None,
     clip: bool = False,
     field: Optional[str] = None,
+    interactive_followup: bool = False,
 ) -> None:
     """Retrieve a password entry, display it or copy to clipboard."""
     if not entry:
@@ -406,6 +450,27 @@ def cmd_get(
     console.print(Panel("\n".join(lines), title=f"[bold cyan]{entry}[/bold cyan]",
                         border_style="cyan"))
 
+    if interactive_followup:
+        hint_parts = ["[dim][cyan]c[/cyan]=copy password"]
+        if data.get("username") or data.get("email"):
+            hint_parts.append("[cyan]u[/cyan]=username")
+        if data.get("url"):
+            hint_parts.append("[cyan]l[/cyan]=URL")
+        hint_parts.append("Enter=done[/dim]")
+        console.print("  " + "  ".join(hint_parts))
+        try:
+            choice = Prompt.ask("", default="").strip().lower()
+        except KeyboardInterrupt:
+            return
+        if choice == "c":
+            copy_to_clipboard(data["password"])
+        elif choice == "u":
+            val = data.get("username") or data.get("email", "")
+            if val:
+                copy_to_clipboard(val)
+        elif choice == "l" and data.get("url"):
+            copy_to_clipboard(data["url"])
+
 
 def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
     """Add a new password entry with guided prompts."""
@@ -417,13 +482,21 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
 
     if structured:
         console.print(Panel(
-            "Fill in the fields below. Press Enter to skip optional fields.",
+            "Fill in the fields below. Press Enter to skip optional fields.\n"
+            "Leave password blank to auto-generate one.",
             title="[bold cyan]New Entry[/bold cyan]", border_style="cyan"
         ))
-        password = Prompt.ask("[bold]Password[/bold]", password=True)
+        password = Prompt.ask("[bold]Password[/bold] (Enter to generate)", password=True, default="")
         if not password:
-            console.print("[red]Password cannot be empty.[/red]")
-            return
+            length = IntPrompt.ask(
+                "[dim]Length[/dim]",
+                default=CONFIG.get("default_password_length", 20),
+            )
+            use_symbols = Confirm.ask("[dim]Include symbols?[/dim]", default=True)
+            password = generate_password(length, use_symbols)
+            console.print(f"[green]Generated:[/green] {password}")
+        score, label, color = password_strength(password)
+        console.print(f"  Strength: {strength_bar(score, color)} [dim]{label}[/dim]")
         username = Prompt.ask("[dim]Username[/dim]", default="")
         email = Prompt.ask("[dim]Email[/dim]", default="")
         url = Prompt.ask("[dim]URL[/dim]", default="")
@@ -490,10 +563,14 @@ def cmd_generate(
         return
 
     console.print(f"[green]Generated password for '[bold]{entry}[/bold]'.[/green]")
-    if clip:
-        content, error = get_entry_raw(entry)
-        if content:
-            copy_to_clipboard(parse_entry(content)["password"])
+    content, error = get_entry_raw(entry)
+    if content:
+        pw = parse_entry(content)["password"]
+        score, label, color = password_strength(pw)
+        console.print(f"  Password: {pw}")
+        console.print(f"  Strength: {strength_bar(score, color)} [dim]{label}[/dim]")
+        if clip:
+            copy_to_clipboard(pw)
 
 
 def cmd_health() -> None:
@@ -563,6 +640,20 @@ def cmd_health() -> None:
             t.add_row(r["entry"], strength_bar(r["score"], r["color"]) + f" {r['label']}",
                       str(r["len"]), dup)
         console.print(t)
+        console.print("[dim]  Tip: run [bold]generate <entry>[/bold] to replace with a strong password[/dim]")
+
+    if fair:
+        console.print("\n[bold yellow]Fair Passwords[/bold yellow] (consider upgrading):")
+        t = Table(box=box.SIMPLE)
+        t.add_column("Entry", style="cyan")
+        t.add_column("Strength", justify="center")
+        t.add_column("Len", justify="right", style="dim")
+        t.add_column("Dup", justify="center")
+        for r in fair:
+            dup = "[red]YES[/red]" if r["entry"] in dup_set else ""
+            t.add_row(r["entry"], strength_bar(r["score"], r["color"]) + f" {r['label']}",
+                      str(r["len"]), dup)
+        console.print(t)
 
     if dup_groups:
         console.print("\n[bold magenta]Duplicate Passwords[/bold magenta]:")
@@ -570,6 +661,7 @@ def cmd_health() -> None:
             console.print(
                 f"  Group {i}: " + "  |  ".join(f"[cyan]{e}[/cyan]" for e in group)
             )
+        console.print("[dim]  Tip: use unique passwords for each account[/dim]")
 
     if errors:
         console.print(
@@ -807,6 +899,79 @@ def cmd_import(filepath: str, fmt: str = "auto") -> None:
     )
 
 
+def _preview_entry_metadata(entry: str) -> None:
+    """Show a brief preview of entry metadata (no password) for confirmation flows."""
+    content, error = get_entry_raw(entry)
+    if error:
+        return
+    data = parse_entry(content)
+    parts = [f"[bold]{entry}[/bold]"]
+    if data.get("username"):
+        parts.append(f"  [dim]Username:[/dim] {data['username']}")
+    if data.get("email"):
+        parts.append(f"  [dim]Email:[/dim] {data['email']}")
+    if data.get("url"):
+        parts.append(f"  [dim]URL:[/dim] {data['url']}")
+    console.print("\n".join(parts))
+
+
+def _entry_action_menu(entry: str) -> None:
+    """Show an action menu for a selected entry and execute the chosen action."""
+    console.print(f"\n[dim]Selected:[/dim] [bold]{entry}[/bold]")
+    console.print(
+        "  [cyan]s[/cyan] Show          View full entry details\n"
+        "  [cyan]c[/cyan] Copy          Copy password to clipboard\n"
+        "  [cyan]u[/cyan] Username      Copy username to clipboard\n"
+        "  [cyan]l[/cyan] URL           Copy URL to clipboard\n"
+        "  [cyan]o[/cyan] OTP           Generate TOTP code\n"
+        "  [cyan]e[/cyan] Edit          Open in $EDITOR\n"
+        "  [cyan]d[/cyan] Delete        Delete this entry\n"
+        "  [cyan]q[/cyan] Cancel"
+    )
+    try:
+        action = Prompt.ask("Action", default="s").strip().lower()
+    except KeyboardInterrupt:
+        return
+
+    if action == "s":
+        cmd_get(entry)
+    elif action == "c":
+        cmd_get(entry, clip=True)
+    elif action == "u":
+        content, error = get_entry_raw(entry)
+        if error:
+            console.print(f"[red]Error:[/red] {error}")
+        else:
+            data = parse_entry(content)
+            username = data.get("username") or data.get("email", "")
+            if username:
+                copy_to_clipboard(username)
+            else:
+                console.print("[yellow]No username or email found in this entry.[/yellow]")
+    elif action == "l":
+        content, error = get_entry_raw(entry)
+        if error:
+            console.print(f"[red]Error:[/red] {error}")
+        else:
+            data = parse_entry(content)
+            url = data.get("url", "")
+            if url:
+                copy_to_clipboard(url)
+            else:
+                console.print("[yellow]No URL found in this entry.[/yellow]")
+    elif action == "o":
+        cmd_otp(entry)
+    elif action == "e":
+        run_command(["pass", "edit", entry], interactive=True)
+    elif action == "d":
+        if Confirm.ask(f"[red]Delete '{entry}'?[/red]", default=False):
+            _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
+            console.print(
+                f"[green]Deleted '{entry}'.[/green]" if rc == 0
+                else f"[red]Error:[/red] {err}"
+            )
+
+
 def cmd_browse() -> None:
     """Fuzzy-pick an entry then choose what to do with it."""
     entries = get_all_entries()
@@ -818,24 +983,7 @@ def cmd_browse() -> None:
     if not entry:
         return
 
-    console.print(f"\n[dim]Selected:[/dim] [bold]{entry}[/bold]")
-    console.print(
-        "  [cyan]1[/cyan] Show    [cyan]2[/cyan] Copy    "
-        "[cyan]3[/cyan] OTP    [cyan]4[/cyan] Edit    [cyan]5[/cyan] Cancel"
-    )
-    try:
-        action = IntPrompt.ask("Action", default=1)
-    except KeyboardInterrupt:
-        return
-
-    if action == 1:
-        cmd_get(entry)
-    elif action == 2:
-        cmd_get(entry, clip=True)
-    elif action == 3:
-        cmd_otp(entry)
-    elif action == 4:
-        run_command(["pass", "edit", entry], interactive=True)
+    _entry_action_menu(entry)
 
 
 def cmd_wizard() -> None:
@@ -1023,7 +1171,7 @@ class PassShell(cmd.Cmd):
             else:
                 entry = parts[i]
             i += 1
-        cmd_get(entry, clip, field)
+        cmd_get(entry, clip, field, interactive_followup=not clip and not field)
 
     complete_get = _complete_entries
 
@@ -1077,6 +1225,7 @@ class PassShell(cmd.Cmd):
         entry = arg.strip() or fuzzy_select(get_all_entries(), "Select entry to delete")
         if not entry:
             return
+        _preview_entry_metadata(entry)
         if Confirm.ask(f"[red]Delete '{entry}'?[/red]", default=False):
             _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
             console.print(
@@ -1097,10 +1246,16 @@ class PassShell(cmd.Cmd):
         console.print(out if rc == 0 else f"[red]{err}[/red]")
 
     def do_find(self, arg: str) -> None:
-        """find <term>  Search entries by name."""
+        """find <term>  Search entries by name, then optionally act on a result."""
         term = arg.strip() or Prompt.ask("Search term")
         out, err, rc = run_command(["pass", "find", term])
         console.print(out if rc == 0 else f"[red]{err}[/red]")
+        if rc == 0:
+            matches = [e for e in get_all_entries() if term.lower() in e.lower()]
+            if matches:
+                entry = fuzzy_select(matches, "Act on entry (0 to skip)")
+                if entry:
+                    _entry_action_menu(entry)
 
     # -- Power user commands -------------------------------------------------
 
@@ -1503,6 +1658,8 @@ def main() -> None:
     elif args.command == "delete":
         entry = args.entry or fuzzy_select(get_all_entries(), "Select entry to delete")
         if entry:
+            if not args.force:
+                _preview_entry_metadata(entry)
             if args.force or Confirm.ask(f"[red]Delete '{entry}'?[/red]", default=False):
                 _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
                 console.print(
@@ -1537,6 +1694,12 @@ def main() -> None:
     elif args.command == "find":
         out, err, rc = run_command(["pass", "find", args.term])
         console.print(out if rc == 0 else f"[red]{err}[/red]")
+        if rc == 0:
+            matches = [e for e in get_all_entries() if args.term.lower() in e.lower()]
+            if matches:
+                entry = fuzzy_select(matches, "Act on entry (0 to skip)")
+                if entry:
+                    _entry_action_menu(entry)
 
     elif args.command == "ls":
         cmd_args = ["pass", "ls"] + ([args.path] if args.path else [])
