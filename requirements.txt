@@ -1,0 +1,12 @@
+# PassCLI dependencies
+
+# Required
+rich>=13.0
+
+# Optional — clipboard support (auto-clear after timeout)
+# pip install pyperclip
+pyperclip
+
+# Optional — TOTP/OTP code generation
+# pip install pyotp
+pyotp

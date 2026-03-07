@@ -1,617 +1,1586 @@
 #!/usr/bin/env python3
+"""
+PassCLI — A feature-rich, smart wrapper for the `pass` password manager.
 
+Designed for normal users and power users/developers alike.
+
+Usage:
+  passcli                          # Start interactive shell
+  passcli get email/gmail          # Show a password
+  passcli get email/gmail --clip   # Copy to clipboard
+  passcli insert web/github        # Add new entry (guided)
+  passcli health                   # Password health report
+  passcli otp web/github           # Generate TOTP code
+  passcli run aws/prod -- aws s3 ls  # Inject secrets as env vars
+  passcli import passwords.csv     # Import from Bitwarden/LastPass
+  passcli sync                     # Git pull + push
+  passcli wizard                   # First-time setup
+"""
+
+import argparse
 import cmd
+import csv
+import hashlib
+import json
+import os
+import readline
+import shutil
 import subprocess
 import sys
-from rich.console import Console
-from rich.table import Table
-from rich.prompt import Prompt, IntPrompt
-from typing import List, Tuple
+import threading
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-# Initialize Rich Console
+from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
+from rich.prompt import Confirm, IntPrompt, Prompt
+from rich.table import Table
+
 console = Console()
 
-# Check for CLI mode activation
-CLI_MODE = "--enable-cli-mode" in sys.argv
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+CONFIG_PATH = Path.home() / ".config" / "passcli" / "config.json"
+DEFAULT_CONFIG: Dict = {
+    "clip_timeout": 45,
+    "default_password_length": 20,
+    "default_mode": "shell",
+    "pass_dir": str(Path.home() / ".password-store"),
+}
 
 
-def run_command(command_parts: List[str], interactive: bool = False) -> Tuple[str, str]:
-    """
-    Executes a shell command securely using a list of command parts.
+def load_config() -> Dict:
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH) as f:
+                return {**DEFAULT_CONFIG, **json.load(f)}
+        except Exception:
+            pass
+    return DEFAULT_CONFIG.copy()
 
-    Args:
-        command_parts: The command and its arguments as a list of strings (e.g., ["pass", "show"]).
-        interactive: If True, runs the command directly without capturing output.
 
-    Returns:
-        A tuple of (stdout, stderr).
-    """
+def save_config(config: Dict) -> None:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+
+
+CONFIG = load_config()
+
+# ---------------------------------------------------------------------------
+# Dependency detection
+# ---------------------------------------------------------------------------
+
+
+def check_dependencies() -> Dict[str, bool]:
+    deps: Dict[str, bool] = {}
+    for tool in ["pass", "gpg", "fzf", "git"]:
+        deps[tool] = shutil.which(tool) is not None
     try:
-        # Avoiding shell=True for security reasons (shell injection prevention)
-        if interactive:
-            # For interactive commands (like gpg or pass edit), we let them run directly
-            subprocess.run(command_parts)
-            return "", ""
-        else:
-            result = subprocess.run(
-                command_parts,
-                text=True,
-                capture_output=True,
-                check=False  # Do not raise an exception for non-zero exit codes immediately
-            )
-            return result.stdout.strip(), result.stderr.strip()
+        import pyperclip  # noqa: F401
+        deps["pyperclip"] = True
+    except ImportError:
+        deps["pyperclip"] = False
+    try:
+        import pyotp  # noqa: F401
+        deps["pyotp"] = True
+    except ImportError:
+        deps["pyotp"] = False
+    return deps
 
+
+DEPS = check_dependencies()
+
+# ---------------------------------------------------------------------------
+# Core helpers
+# ---------------------------------------------------------------------------
+
+
+def run_command(
+    command_parts: List[str],
+    interactive: bool = False,
+    input_data: Optional[str] = None,
+) -> Tuple[str, str, int]:
+    """Run a subprocess safely (no shell=True). Returns (stdout, stderr, returncode)."""
+    try:
+        if interactive:
+            result = subprocess.run(command_parts)
+            return "", "", result.returncode
+        result = subprocess.run(
+            command_parts,
+            text=True,
+            capture_output=True,
+            input=input_data,
+            check=False,
+        )
+        return result.stdout.strip(), result.stderr.strip(), result.returncode
     except FileNotFoundError:
-        return "", f"Error: Command not found. Is {' '.join(command_parts)} installed and in your PATH?"
+        name = command_parts[0] if command_parts else "unknown"
+        return "", f"Command not found: '{name}'. Is it installed and in PATH?", 127
     except Exception as e:
-        return "", str(e)
+        return "", str(e), 1
+
+
+def get_all_entries() -> List[str]:
+    """Return all pass entry paths, sorted."""
+    pass_dir = Path(CONFIG.get("pass_dir", Path.home() / ".password-store"))
+    if not pass_dir.exists():
+        return []
+    entries = []
+    for f in pass_dir.rglob("*.gpg"):
+        rel = f.relative_to(pass_dir)
+        entry = str(rel)
+        if entry.endswith(".gpg"):
+            entry = entry[:-4]
+        if not entry.startswith("."):
+            entries.append(entry)
+    return sorted(entries)
 
 
 def get_gpg_keys() -> List[Tuple[str, str]]:
-    """Retrieves GPG key IDs and user info."""
-    # Use the secure list format
-    command = ["gpg", "--list-keys", "--keyid-format", "LONG"]
-    out, err = run_command(command)
-    keys = []
-
-    if not err:
-        for line in out.splitlines():
-            # Look for lines starting with 'pub' (public key)
-            if line.startswith("pub"):
-                try:
-                    parts = line.split()
-                    # The key info is typically the second part, e.g., 'rsa4096/987654321ABCDEF0'
-                    key_info = parts[1]
-                    # Extract the Key ID (the part after the '/')
-                    key_id = key_info.split("/")[1] if "/" in key_info else key_info
-                    # User info starts from the 3rd part onwards
-                    user_info = " ".join(parts[2:])
-                    keys.append((key_id, user_info))
-                except IndexError:
-                    # Skip malformed lines
-                    continue
+    """Return list of (key_id, user_info) for all GPG public keys."""
+    out, _, _ = run_command(["gpg", "--list-keys", "--keyid-format", "LONG"])
+    keys: List[Tuple[str, str]] = []
+    for line in out.splitlines():
+        if line.startswith("pub"):
+            try:
+                parts = line.split()
+                key_info = parts[1]
+                key_id = key_info.split("/")[1] if "/" in key_info else key_info
+                user_info = " ".join(parts[2:])
+                keys.append((key_id, user_info))
+            except IndexError:
+                continue
     return keys
 
 
-class PassCLI(cmd.Cmd):
+# ---------------------------------------------------------------------------
+# Fuzzy selection
+# ---------------------------------------------------------------------------
+
+
+def fuzzy_select(entries: List[str], prompt_text: str = "Select entry") -> Optional[str]:
+    """Pick an entry using fzf if available, otherwise a numbered list."""
+    if not entries:
+        console.print("[yellow]No entries found.[/yellow]")
+        return None
+
+    if DEPS.get("fzf"):
+        try:
+            result = subprocess.run(
+                ["fzf", "--prompt", f"{prompt_text}: ", "--height", "40%",
+                 "--reverse", "--border"],
+                input="\n".join(entries),
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+            return None
+        except Exception:
+            pass
+
+    # Fallback: numbered list
+    table = Table(show_header=False, box=box.SIMPLE)
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Entry", style="green")
+    for i, entry in enumerate(entries, 1):
+        table.add_row(str(i), entry)
+    console.print(table)
+    try:
+        choice = IntPrompt.ask(f"{prompt_text} (number)", default=0)
+        if 1 <= choice <= len(entries):
+            return entries[choice - 1]
+    except (KeyboardInterrupt, ValueError):
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Clipboard
+# ---------------------------------------------------------------------------
+
+
+def copy_to_clipboard(text: str, timeout: Optional[int] = None) -> bool:
+    """Copy text to clipboard and schedule auto-clear after `timeout` seconds."""
+    timeout = timeout if timeout is not None else CONFIG.get("clip_timeout", 45)
+    copied = False
+
+    if DEPS.get("pyperclip"):
+        import pyperclip
+        try:
+            pyperclip.copy(text)
+            copied = True
+        except Exception:
+            pass
+
+    if not copied:
+        for cmd_args in [["pbcopy"], ["xclip", "-selection", "clipboard"], ["wl-copy"]]:
+            if shutil.which(cmd_args[0]):
+                try:
+                    subprocess.run(cmd_args, input=text, text=True, check=True,
+                                   capture_output=True)
+                    copied = True
+                    break
+                except Exception:
+                    continue
+
+    if not copied:
+        console.print(
+            "[red]No clipboard tool found.[/red] "
+            "Install pyperclip: [cyan]pip install pyperclip[/cyan]"
+        )
+        return False
+
+    console.print(
+        f"[green]Copied to clipboard.[/green] "
+        f"Auto-clearing in [bold]{timeout}s[/bold]..."
+    )
+
+    def _clear():
+        time.sleep(timeout)
+        if DEPS.get("pyperclip"):
+            import pyperclip
+            try:
+                if pyperclip.paste() == text:
+                    pyperclip.copy("")
+            except Exception:
+                pass
+        else:
+            for cmd_args in [["pbcopy"], ["xclip", "-selection", "clipboard"], ["wl-copy"]]:
+                if shutil.which(cmd_args[0]):
+                    try:
+                        subprocess.run(cmd_args, input="", text=True, check=True,
+                                       capture_output=True)
+                    except Exception:
+                        pass
+                    break
+
+    threading.Thread(target=_clear, daemon=True).start()
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Structured entry format
+#
+# Pass stores free-form text. PassCLI treats the first line as the password
+# and subsequent lines as "key: value" metadata (username, url, email, notes).
+# This is compatible with pass-import and most pass extensions.
+# ---------------------------------------------------------------------------
+
+
+def parse_entry(content: str) -> Dict[str, str]:
+    lines = content.splitlines()
+    data: Dict[str, str] = {"password": lines[0] if lines else ""}
+    for line in lines[1:]:
+        if ": " in line:
+            key, _, value = line.partition(": ")
+            data[key.strip().lower()] = value.strip()
+        elif line.strip():
+            data.setdefault("notes", "")
+            data["notes"] += line + "\n"
+    return data
+
+
+def format_entry(data: Dict[str, str]) -> str:
+    lines = [data.get("password", "")]
+    for key in ("username", "email", "url"):
+        if data.get(key):
+            lines.append(f"{key}: {data[key]}")
+    # Any extra keys
+    skip = {"password", "username", "email", "url", "notes"}
+    for key, value in data.items():
+        if key not in skip and value:
+            lines.append(f"{key}: {value}")
+    if data.get("notes"):
+        lines.append(data["notes"].strip())
+    return "\n".join(lines) + "\n"
+
+
+def get_entry_raw(entry: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return (content, error). content is None on failure."""
+    out, err, rc = run_command(["pass", "show", entry])
+    if rc != 0 or not out:
+        return None, err or "Entry not found."
+    return out, None
+
+
+# ---------------------------------------------------------------------------
+# Password strength
+# ---------------------------------------------------------------------------
+
+
+def password_strength(password: str) -> Tuple[int, str, str]:
+    """Return (score 0-4, label, rich_color)."""
+    if not password:
+        return 0, "Empty", "red"
+    score = 0
+    n = len(password)
+    if n >= 8:
+        score += 1
+    if n >= 14:
+        score += 1
+    if n >= 20:
+        score += 1
+    variety = sum([
+        any(c.islower() for c in password),
+        any(c.isupper() for c in password),
+        any(c.isdigit() for c in password),
+        any(not c.isalnum() for c in password),
+    ])
+    if variety >= 3:
+        score += 1
+    if variety == 4:
+        score += 1
+    score = min(score, 4)
+    labels = ["Very Weak", "Weak", "Fair", "Strong", "Very Strong"]
+    colors = ["red", "red", "yellow", "green", "bright_green"]
+    return score, labels[score], colors[score]
+
+
+def strength_bar(score: int, color: str) -> str:
+    return f"[{color}]{'█' * (score + 1)}{'░' * (4 - score)}[/{color}]"
+
+
+# ---------------------------------------------------------------------------
+# Feature commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_get(
+    entry: Optional[str] = None,
+    clip: bool = False,
+    field: Optional[str] = None,
+) -> None:
+    """Retrieve a password entry, display it or copy to clipboard."""
+    if not entry:
+        entries = get_all_entries()
+        entry = fuzzy_select(entries, "Select entry")
+        if not entry:
+            return
+
+    content, error = get_entry_raw(entry)
+    if error:
+        console.print(f"[red]Error:[/red] {error}")
+        return
+
+    data = parse_entry(content)
+
+    if field:
+        value = data.get(field.lower())
+        if value is None:
+            console.print(f"[red]Field '{field}' not found in entry '{entry}'.[/red]")
+            return
+        if clip:
+            copy_to_clipboard(value)
+        else:
+            console.print(value)
+        return
+
+    if clip:
+        copy_to_clipboard(data["password"])
+        return
+
+    # Rich display
+    score, label, color = password_strength(data["password"])
+    lines = [f"[bold]Password:[/bold] {data['password']}"]
+    for key in ("username", "email", "url"):
+        if data.get(key):
+            lines.append(f"[cyan]{key.capitalize()}:[/cyan] {data[key]}")
+    skip = {"password", "username", "email", "url", "notes"}
+    for key, val in data.items():
+        if key not in skip:
+            lines.append(f"[magenta]{key}:[/magenta] {val}")
+    if data.get("notes"):
+        lines.append(f"[dim]Notes:[/dim] {data['notes'].strip()}")
+    lines.append(f"\n{strength_bar(score, color)} [dim]{label}[/dim]")
+    console.print(Panel("\n".join(lines), title=f"[bold cyan]{entry}[/bold cyan]",
+                        border_style="cyan"))
+
+
+def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
+    """Add a new password entry with guided prompts."""
+    if not entry:
+        entry = Prompt.ask("[cyan]Entry name[/cyan] (e.g. web/github, email/work)")
+    if not entry.strip():
+        console.print("[red]Entry name cannot be empty.[/red]")
+        return
+
+    if structured:
+        console.print(Panel(
+            "Fill in the fields below. Press Enter to skip optional fields.",
+            title="[bold cyan]New Entry[/bold cyan]", border_style="cyan"
+        ))
+        password = Prompt.ask("[bold]Password[/bold]", password=True)
+        if not password:
+            console.print("[red]Password cannot be empty.[/red]")
+            return
+        username = Prompt.ask("[dim]Username[/dim]", default="")
+        email = Prompt.ask("[dim]Email[/dim]", default="")
+        url = Prompt.ask("[dim]URL[/dim]", default="")
+        notes = Prompt.ask("[dim]Notes[/dim]", default="")
+        data: Dict[str, str] = {"password": password}
+        if username:
+            data["username"] = username
+        if email:
+            data["email"] = email
+        if url:
+            data["url"] = url
+        if notes:
+            data["notes"] = notes
+        content = format_entry(data)
+    else:
+        console.print("Paste/type entry content (Ctrl-D to finish):")
+        try:
+            content = sys.stdin.read()
+        except KeyboardInterrupt:
+            console.print("[yellow]Cancelled.[/yellow]")
+            return
+
+    proc = subprocess.Popen(
+        ["pass", "insert", "-m", "-f", entry],
+        stdin=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    _, stderr = proc.communicate(content)
+    if proc.returncode == 0:
+        console.print(f"[green]Saved '[bold]{entry}[/bold]' successfully.[/green]")
+    else:
+        console.print(f"[red]Error:[/red] {stderr.strip()}")
+
+
+def cmd_generate(
+    entry: Optional[str] = None,
+    length: Optional[int] = None,
+    no_symbols: bool = False,
+    clip: bool = False,
+) -> None:
+    """Generate a random password for an entry."""
+    if not entry:
+        entry = Prompt.ask("[cyan]Entry name[/cyan]")
+    if not entry.strip():
+        console.print("[red]Entry name cannot be empty.[/red]")
+        return
+    if not length:
+        length = IntPrompt.ask("Length", default=CONFIG.get("default_password_length", 20))
+
+    args = ["pass", "generate", "-f"]
+    if no_symbols:
+        args.append("-n")
+    args += [entry, str(length)]
+
+    out, err, rc = run_command(args)
+    if rc != 0:
+        if "No public key" in err or "encryption failed" in err:
+            console.print(
+                "[red]GPG encryption failed.[/red] "
+                "Run [bold]init[/bold] to set up your password store."
+            )
+        else:
+            console.print(f"[red]Error:[/red] {err}")
+        return
+
+    console.print(f"[green]Generated password for '[bold]{entry}[/bold]'.[/green]")
+    if clip:
+        content, error = get_entry_raw(entry)
+        if content:
+            copy_to_clipboard(parse_entry(content)["password"])
+
+
+def cmd_health() -> None:
+    """Scan all entries for password strength and duplicates."""
+    entries = get_all_entries()
+    if not entries:
+        console.print("[yellow]No entries found in the password store.[/yellow]")
+        return
+
+    console.print(f"\n[bold]Scanning [cyan]{len(entries)}[/cyan] entries...[/bold]\n")
+
+    results = []
+    hash_map: Dict[str, List[str]] = {}
+    errors = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Analysing...", total=len(entries))
+        for entry in entries:
+            content, error = get_entry_raw(entry)
+            if error or not content:
+                errors.append(entry)
+                progress.advance(task)
+                continue
+            data = parse_entry(content)
+            pw = data.get("password", "")
+            score, label, color = password_strength(pw)
+            phash = hashlib.sha256(pw.encode()).hexdigest()
+            hash_map.setdefault(phash, []).append(entry)
+            results.append({
+                "entry": entry, "score": score, "label": label,
+                "color": color, "len": len(pw), "hash": phash,
+            })
+            progress.advance(task)
+
+    dup_groups = {h: g for h, g in hash_map.items() if len(g) > 1}
+    dup_set = {e for g in dup_groups.values() for e in g}
+    results.sort(key=lambda r: r["score"])
+
+    weak = [r for r in results if r["score"] <= 1]
+    fair = [r for r in results if r["score"] == 2]
+    strong = [r for r in results if r["score"] >= 3]
+
+    console.print(Panel(
+        f"[green]Strong:[/green] {len(strong)}   "
+        f"[yellow]Fair:[/yellow] {len(fair)}   "
+        f"[red]Weak:[/red] {len(weak)}   "
+        f"[magenta]Duplicates:[/magenta] {len(dup_set)}   "
+        f"[dim]Errors:[/dim] {len(errors)}",
+        title="[bold]Password Health Report[/bold]",
+    ))
+
+    if weak:
+        console.print("\n[bold red]Weak Passwords[/bold red] (update these):")
+        t = Table(box=box.SIMPLE)
+        t.add_column("Entry", style="cyan")
+        t.add_column("Strength", justify="center")
+        t.add_column("Len", justify="right", style="dim")
+        t.add_column("Dup", justify="center")
+        for r in weak:
+            dup = "[red]YES[/red]" if r["entry"] in dup_set else ""
+            t.add_row(r["entry"], strength_bar(r["score"], r["color"]) + f" {r['label']}",
+                      str(r["len"]), dup)
+        console.print(t)
+
+    if dup_groups:
+        console.print("\n[bold magenta]Duplicate Passwords[/bold magenta]:")
+        for i, (_, group) in enumerate(list(dup_groups.items())[:10], 1):
+            console.print(
+                f"  Group {i}: " + "  |  ".join(f"[cyan]{e}[/cyan]" for e in group)
+            )
+
+    if errors:
+        console.print(
+            f"\n[dim]Could not decrypt {len(errors)} entries "
+            f"(wrong key or locked agent).[/dim]"
+        )
+
+
+def cmd_otp(entry: Optional[str] = None) -> None:
+    """Generate a TOTP code from a stored OTP secret."""
+    if not DEPS.get("pyotp"):
+        console.print(
+            "[red]pyotp not installed.[/red] Run: [cyan]pip install pyotp[/cyan]"
+        )
+        return
+
+    import pyotp
+
+    if not entry:
+        entries = get_all_entries()
+        entry = fuzzy_select(entries, "Select OTP entry")
+        if not entry:
+            return
+
+    content, error = get_entry_raw(entry)
+    if error:
+        console.print(f"[red]Error:[/red] {error}")
+        return
+
+    data = parse_entry(content)
+    secret = (
+        data.get("otp") or data.get("totp") or
+        data.get("secret") or data.get("otpauth")
+    )
+    if not secret:
+        for val in data.values():
+            if val and val.startswith("otpauth://"):
+                secret = val
+                break
+
+    if not secret:
+        console.print(f"[red]No OTP secret in '{entry}'.[/red]")
+        console.print(
+            "[dim]Add a field like [bold]otp: YOUR_SECRET[/bold] to the entry.[/dim]"
+        )
+        return
+
+    try:
+        totp = pyotp.parse_uri(secret) if secret.startswith("otpauth://") \
+            else pyotp.TOTP(secret.upper().replace(" ", ""))
+    except Exception as e:
+        console.print(f"[red]Invalid OTP secret:[/red] {e}")
+        return
+
+    code = totp.now()
+    remaining = 30 - (int(time.time()) % 30)
+    console.print(Panel(
+        f"[bold green]{code[:3]} {code[3:]}[/bold green]\n"
+        f"[dim]Valid for {remaining}s  |  {entry}[/dim]",
+        title="[bold]OTP Code[/bold]", border_style="green",
+    ))
+    copy_to_clipboard(code, timeout=remaining + 2)
+
+
+def cmd_run(entry: str, command: List[str]) -> None:
+    """
+    Inject a pass entry's fields as environment variables, then exec `command`.
+
+    Field mapping:  password -> PASS_PASSWORD
+                    username -> PASS_USERNAME
+                    url      -> PASS_URL  (etc.)
+    """
+    if not command:
+        console.print("[red]No command supplied after entry.[/red]")
+        console.print("[dim]Usage: run <entry> -- <command>[/dim]")
+        return
+
+    content, error = get_entry_raw(entry)
+    if error:
+        console.print(f"[red]Error:[/red] {error}")
+        return
+
+    data = parse_entry(content)
+    env = os.environ.copy()
+    injected = []
+    for key, value in data.items():
+        env_key = f"PASS_{key.upper().replace('-', '_')}"
+        env[env_key] = value
+        injected.append(env_key)
+
+    console.print(f"[dim]Injecting:[/dim] {', '.join(injected)}")
+    console.print(f"[dim]Running:[/dim] {' '.join(command)}\n")
+    try:
+        result = subprocess.run(command, env=env)
+        sys.exit(result.returncode)
+    except FileNotFoundError:
+        console.print(f"[red]Command not found:[/red] {command[0]}")
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_sync() -> None:
+    """Pull then push the password store git repository."""
+    console.print("[bold]Syncing password store...[/bold]")
+    for action in ("pull", "push"):
+        console.print(f"[dim]{action.capitalize()}ing...[/dim]")
+        out, err, rc = run_command(["pass", "git", action])
+        if rc != 0:
+            console.print(f"[red]{action.capitalize()} failed:[/red] {err or out}")
+            return
+        if out:
+            console.print(out)
+    console.print("[bold green]Sync complete.[/bold green]")
+
+
+def cmd_git_log(n: int = 10) -> None:
+    """Show recent git history of the password store."""
+    out, err, rc = run_command([
+        "pass", "git", "log",
+        "--oneline", f"-{n}",
+        "--format=%C(yellow)%h%Creset %C(green)%ar%Creset %s",
+    ])
+    if rc != 0:
+        console.print(f"[red]Error:[/red] {err}")
+        return
+    if not out:
+        console.print("[yellow]No git history found. Run 'sync' to set up remote.[/yellow]")
+        return
+    console.print(Panel(out, title="[bold]Password Store History[/bold]", border_style="dim"))
+
+
+def cmd_import(filepath: str, fmt: str = "auto") -> None:
+    """
+    Import passwords from a CSV export.
+    Supports Bitwarden, LastPass, 1Password, and generic CSV formats.
+    """
+    path = Path(filepath)
+    if not path.exists():
+        console.print(f"[red]File not found:[/red] {filepath}")
+        return
+
+    # Auto-detect format
+    if fmt == "auto":
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            header = f.readline().lower()
+        if "login_uri" in header or "bitwarden" in filepath.lower():
+            fmt = "bitwarden"
+        elif "grouping" in header or "lastpass" in filepath.lower():
+            fmt = "lastpass"
+        elif "notesplaintext" in header or "1password" in filepath.lower():
+            fmt = "1password"
+        else:
+            fmt = "generic"
+
+    console.print(f"[bold]Importing[/bold] {filepath} [dim](format: {fmt})[/dim]")
+    imported = skipped = 0
+
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            row = {k.lower().strip(): v.strip() for k, v in row.items() if k}
+
+            if fmt == "bitwarden":
+                name = row.get("name", "")
+                folder = row.get("folder", "")
+                username = row.get("login_username", "")
+                password = row.get("login_password", "")
+                url = row.get("login_uri", "")
+                notes = row.get("notes", "")
+                otp = row.get("login_totp", "")
+            elif fmt == "lastpass":
+                name = row.get("name", "")
+                folder = row.get("grouping", "")
+                username = row.get("username", "")
+                password = row.get("password", "")
+                url = row.get("url", "")
+                notes = row.get("extra", "")
+                otp = ""
+            elif fmt == "1password":
+                name = row.get("title", "")
+                folder = row.get("type", "")
+                username = row.get("username", "")
+                password = row.get("password", "")
+                url = row.get("url", "")
+                notes = row.get("notesplaintext", "")
+                otp = row.get("totp secret key", "")
+            else:  # generic
+                name = row.get("name", row.get("title", ""))
+                folder = row.get("folder", row.get("group", ""))
+                username = row.get("username", row.get("login", ""))
+                password = row.get("password", "")
+                url = row.get("url", row.get("uri", ""))
+                notes = row.get("notes", row.get("extra", ""))
+                otp = row.get("totp", row.get("otp", ""))
+
+            if not name or not password:
+                skipped += 1
+                continue
+
+            safe_name = name.replace("/", "-").replace(" ", "_").lower()
+            safe_folder = folder.replace("/", "-").replace(" ", "_").lower() if folder else ""
+            entry_path = f"{safe_folder}/{safe_name}" if safe_folder else safe_name
+
+            data: Dict[str, str] = {"password": password}
+            if username:
+                data["username"] = username
+            if url:
+                data["url"] = url
+            if notes:
+                data["notes"] = notes
+            if otp:
+                data["otp"] = otp
+
+            proc = subprocess.Popen(
+                ["pass", "insert", "-m", "-f", entry_path],
+                stdin=subprocess.PIPE, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            _, stderr = proc.communicate(format_entry(data))
+            if proc.returncode == 0:
+                imported += 1
+                console.print(f"  [green]✓[/green] {entry_path}")
+            else:
+                skipped += 1
+                console.print(f"  [red]✗[/red] {entry_path}: {stderr.strip()}")
+
+    console.print(
+        f"\n[bold green]Done:[/bold green] {imported} imported, {skipped} skipped."
+    )
+
+
+def cmd_browse() -> None:
+    """Fuzzy-pick an entry then choose what to do with it."""
+    entries = get_all_entries()
+    if not entries:
+        console.print("[yellow]No entries found.[/yellow]")
+        return
+
+    entry = fuzzy_select(entries, "Browse passwords")
+    if not entry:
+        return
+
+    console.print(f"\n[dim]Selected:[/dim] [bold]{entry}[/bold]")
+    console.print(
+        "  [cyan]1[/cyan] Show    [cyan]2[/cyan] Copy    "
+        "[cyan]3[/cyan] OTP    [cyan]4[/cyan] Edit    [cyan]5[/cyan] Cancel"
+    )
+    try:
+        action = IntPrompt.ask("Action", default=1)
+    except KeyboardInterrupt:
+        return
+
+    if action == 1:
+        cmd_get(entry)
+    elif action == 2:
+        cmd_get(entry, clip=True)
+    elif action == 3:
+        cmd_otp(entry)
+    elif action == 4:
+        run_command(["pass", "edit", entry], interactive=True)
+
+
+def cmd_wizard() -> None:
+    """Guided first-time setup: GPG key + pass init + optional git."""
+    console.print(Panel(
+        "[bold cyan]PassCLI Setup Wizard[/bold cyan]\n\n"
+        "This wizard will set up your GPG key and password store step by step.",
+        border_style="cyan",
+    ))
+
+    # Step 1: Dependencies
+    console.print("\n[bold]Step 1[/bold] — Checking dependencies")
+    missing = [t for t in ("pass", "gpg") if not shutil.which(t)]
+    if missing:
+        console.print(f"[red]Missing:[/red] {', '.join(missing)}")
+        console.print("  macOS:  [cyan]brew install gnupg pass[/cyan]")
+        console.print("  Ubuntu: [cyan]sudo apt install gnupg2 pass[/cyan]")
+        console.print("  Arch:   [cyan]sudo pacman -S gnupg pass[/cyan]")
+        return
+    console.print("[green]✓ pass and gpg are installed[/green]")
+
+    # Step 2: GPG key
+    console.print("\n[bold]Step 2[/bold] — GPG key")
+    keys = get_gpg_keys()
+    use_existing = False
+    if keys:
+        console.print(f"[green]✓ Found {len(keys)} existing GPG key(s):[/green]")
+        for i, (kid, uid) in enumerate(keys, 1):
+            console.print(f"  {i}. [cyan]{kid}[/cyan]  {uid}")
+        use_existing = Confirm.ask("Use an existing key?", default=True)
+
+    if not use_existing:
+        console.print("\n[dim]Launching GPG key generation...[/dim]")
+        console.print("[yellow]Tip: RSA 4096, no expiry is recommended.[/yellow]")
+        run_command(["gpg", "--full-generate-key"], interactive=True)
+        keys = get_gpg_keys()
+        if not keys:
+            console.print("[red]No key found after generation. Aborting.[/red]")
+            return
+
+    if len(keys) == 1:
+        key_id = keys[0][0]
+        console.print(f"[green]Using key: {key_id}[/green]")
+    else:
+        t = Table(box=box.SIMPLE, show_header=False)
+        t.add_column("#", width=3)
+        t.add_column("Key ID", style="cyan")
+        t.add_column("User")
+        for i, (kid, uid) in enumerate(keys, 1):
+            t.add_row(str(i), kid, uid)
+        console.print(t)
+        choice = IntPrompt.ask("Select key number", default=1)
+        key_id = keys[max(0, choice - 1)][0]
+
+    # Step 3: Init pass
+    console.print(f"\n[bold]Step 3[/bold] — Initializing pass with key [cyan]{key_id}[/cyan]")
+    out, err, rc = run_command(["pass", "init", key_id])
+    if rc != 0 and "already initialized" not in (err + out):
+        console.print(f"[red]Error:[/red] {err}")
+        return
+    console.print("[green]✓ Password store ready.[/green]")
+
+    # Step 4: Git
+    console.print("\n[bold]Step 4[/bold] — Git integration (optional)")
+    if shutil.which("git") and Confirm.ask("Enable git tracking for your store?", default=True):
+        run_command(["pass", "git", "init"])
+        console.print("[green]✓ Git initialized.[/green]")
+        remote = Prompt.ask("Remote URL (leave blank to skip)", default="")
+        if remote:
+            run_command(["pass", "git", "remote", "add", "origin", remote])
+            console.print("[green]✓ Remote set.[/green]")
+
+    # Step 5: First entry
+    console.print("\n[bold]Step 5[/bold] — Add your first password?")
+    if Confirm.ask("Add your first entry now?", default=True):
+        cmd_insert()
+
+    console.print(Panel(
+        "[bold green]All done![/bold green]\n\n"
+        "Quick reference:\n"
+        "  [cyan]passcli[/cyan]                 — open interactive shell\n"
+        "  [cyan]passcli get <entry>[/cyan]      — show a password\n"
+        "  [cyan]passcli get <entry> --clip[/cyan] — copy to clipboard\n"
+        "  [cyan]passcli insert <entry>[/cyan]   — add a new entry\n"
+        "  [cyan]passcli health[/cyan]           — password health report\n"
+        "  [cyan]passcli --help[/cyan]           — all commands",
+        border_style="green",
+    ))
+
+
+def cmd_config_show() -> None:
+    t = Table(title="PassCLI Config", box=box.SIMPLE)
+    t.add_column("Key", style="cyan")
+    t.add_column("Value")
+    t.add_column("Description", style="dim")
+    descriptions = {
+        "clip_timeout": "Seconds before clipboard is cleared",
+        "default_password_length": "Default length for generated passwords",
+        "default_mode": "Startup mode (shell/menu)",
+        "pass_dir": "Path to your password store",
+    }
+    for key, val in CONFIG.items():
+        t.add_row(key, str(val), descriptions.get(key, ""))
+    console.print(t)
+    console.print(f"[dim]Config file: {CONFIG_PATH}[/dim]")
+
+
+def cmd_config_set(key: str, value: str) -> None:
+    if key not in DEFAULT_CONFIG:
+        console.print(f"[red]Unknown key:[/red] {key}")
+        console.print(f"Valid keys: {', '.join(DEFAULT_CONFIG)}")
+        return
+    original_type = type(DEFAULT_CONFIG[key])
+    try:
+        if original_type is int:
+            typed_value = int(value)
+        elif original_type is bool:
+            typed_value = value.lower() in ("true", "1", "yes")
+        else:
+            typed_value = value
+    except ValueError:
+        console.print(f"[red]Expected {original_type.__name__} for '{key}'.[/red]")
+        return
+    CONFIG[key] = typed_value
+    save_config(CONFIG)
+    console.print(f"[green]Set[/green] {key} = {typed_value}")
+
+
+# ---------------------------------------------------------------------------
+# Interactive shell
+# ---------------------------------------------------------------------------
+
+
+class PassShell(cmd.Cmd):
     prompt = "passcli> "
 
     def __init__(self):
         super().__init__()
-        # 'cli' mode uses the prompt, 'standard' mode uses the menu
-        self.mode = "cli" if CLI_MODE else "standard"
-        self.password_store_initialized = False  # Simple state tracking
+        self._setup_history()
 
-    def preloop(self):
-        console.print(
-            "\nWelcome to [bold cyan]PassCLI[/bold cyan] – the password manager wizard for pros and newbies alike!\n"
-            "Type 'help' or '?' to list commands. When in doubt, just ask for help.\n",
-            style="bold green"
-        )
-        # Check for password store initialization status
-        out, _ = run_command(["pass", "ls"])
-        if "Password store not initialized" not in out:
-            self.password_store_initialized = True
-            console.print("[green]Password store detected.[/green]")
-        else:
-            console.print("[yellow]Password store not initialized. Use [bold]pass_init[/bold] to begin.[/yellow]")
-
-        if self.mode == "standard":
-            self.do_menu("")
-
-    # --- Menu and Mode Handling ---
-
-    def print_main_menu(self):
-        table = Table(title="Main Menu", show_header=True, header_style="bold magenta")
-        table.add_column("Option", style="bold cyan")
-        table.add_column("Category / Description", style="white")
-        table.add_row("1", "GPG Operations [gpg_gen, gpg_list]")
-        table.add_row("2", "Password Management [pass_init, pass_insert, pass_edit...]")
-        table.add_row("3", "Deletion & Archiving [pass_delete, pass_archive, pass_restore]")
-        table.add_row("4", "Enter CLI Mode [activates passcli prompt]")
-        table.add_row("5", "Exit")
-        console.print(table)
-
-    def handle_main_menu_choice(self, choice):
-        if choice == 1:
-            console.print("\n[bold cyan]GPG Operations[/bold cyan]")
-            console.print("1. gpg_gen - Generate a new GPG key (interactive)")
-            console.print("2. gpg_list - List all available GPG keys")
-            console.print("3. Escape to Main Menu")
-            console.print("4. Exit PassCLI")
-            sub_choice = IntPrompt.ask("Enter the number of your choice", default=1)
-            if sub_choice == 1:
-                self.do_gpg_gen("")
-            elif sub_choice == 2:
-                self.do_gpg_list("")
-            elif sub_choice == 3:
-                return self.do_menu("")
-            elif sub_choice == 4:
-                return self.do_quit("")
-            else:
-                console.print("[red]Invalid GPG option.[/red]")
-
-        elif choice == 2:
-            self.password_management_menu()
-
-        elif choice == 3:
-            console.print("\n[bold cyan]Password Deletion & Archiving[/bold cyan]")
-            console.print("1. pass_delete  - Delete a password entry")
-            console.print("2. pass_archive - Archive a password entry (move to archive/ folder)")
-            console.print("3. pass_restore - Restore an archived password entry")
-            console.print("4. Escape to Main Menu")
-            console.print("5. Exit PassCLI")
-            sub_choice = IntPrompt.ask("Enter the number of your choice", default=1)
-            if sub_choice == 1:
-                self.do_pass_delete("")
-            elif sub_choice == 2:
-                self.do_pass_archive("")
-            elif sub_choice == 3:
-                self.do_pass_restore("")
-            elif sub_choice == 4:
-                return self.do_menu("")
-            elif sub_choice == 5:
-                return self.do_quit("")
-            else:
-                console.print("[red]Invalid option.[/red]")
-
-        elif choice == 4:
-            self.mode = "cli"
-            console.print("[green]Switched to CLI mode. Entering passcli prompt...[/green]")
-            console.print("[yellow] Type 'menu' to return, or 'help' to list commands.[/yellow]")
-        elif choice == 5:
-            self.do_quit("")
-        else:
-            console.print("[red]Invalid menu option.[/red]")
-
-    def password_management_menu(self):
-        console.print("\n[bold cyan]Password Management[/bold cyan]")
-        console.print("1. pass_init     - Initialize the password store")
-        console.print("2. pass_generate - Generate a new password")
-        console.print("3. pass_insert   - Insert a new password")
-        console.print("4. pass_get      - Retrieve a password")
-        console.print("5. pass_edit     - Edit a password entry")
-        console.print("6. pass_show     - Show password details (tree view)")
-        console.print("7. pass_find     - Find password entries (search)")
-        console.print("8. pass_mv       - Move or rename a password entry")
-        console.print("9. pass_cp       - Copy a password entry")
-        console.print("10. pass_archive - Archive a password")
-        console.print("11. pass_restore - Restore an archived password")
-        console.print("12. Escape to Main Menu")
-        console.print("13. Exit PassCLI")
-
-        sub_choice = IntPrompt.ask("Enter the number of your choice", default=1)
-
-        if sub_choice == 1:
-            self.do_pass_init("")
-        elif sub_choice == 2:
-            self.do_pass_generate("")
-        elif sub_choice == 3:
-            self.do_pass_insert("")
-        elif sub_choice == 4:
-            self.do_pass_get("")
-        elif sub_choice == 5:
-            self.do_pass_edit("")
-        elif sub_choice == 6:
-            self.do_pass_show("")
-        elif sub_choice == 7:
-            self.do_pass_find("")
-        elif sub_choice == 8:
-            self.do_pass_mv("")
-        elif sub_choice == 9:
-            self.do_pass_cp("")
-        elif sub_choice == 10:
-            self.do_pass_archive("")
-        elif sub_choice == 11:
-            self.do_pass_restore("")
-        elif sub_choice == 12:
-            return self.do_menu("")
-        elif sub_choice == 13:
-            return self.do_quit("")
-        else:
-            console.print("[red]Invalid option.[/red]")
-            self.password_management_menu()
-
-    def do_menu(self, arg):
-        self.print_main_menu()
+    def _setup_history(self) -> None:
+        hist = Path.home() / ".config" / "passcli" / "history"
+        hist.parent.mkdir(parents=True, exist_ok=True)
         try:
-            choice = IntPrompt.ask("Enter the menu option number")
-            return self.handle_main_menu_choice(choice)
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Menu selection cancelled.[/yellow]")
-            if self.mode == "standard":
-                self.print_main_menu()
+            readline.read_history_file(str(hist))
+        except FileNotFoundError:
+            pass
+        import atexit
+        atexit.register(readline.write_history_file, str(hist))
+        readline.set_history_length(500)
 
-    # --- GPG Commands ---
+    def _complete_entries(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
+        return [e for e in get_all_entries() if e.startswith(text)]
 
-    def do_gpg_gen(self, arg):
-        console.print("[yellow]Get ready to summon a new GPG key![/yellow]")
-        console.print("For top-security, we recommend RSA 4096 with no expiry.")
-        console.print("[dim]Launching GPG key generation (it will be interactive)...[/dim]")
-        # Secure command with args list
-        run_command(["gpg", "--full-generate-key"], interactive=True)
-        console.print("[green]GPG key generation complete.[/green]\n")
+    def preloop(self) -> None:
+        entries = get_all_entries()
+        keys = get_gpg_keys()
+        console.print(Panel(
+            "[bold cyan]PassCLI[/bold cyan] — Smart Password Manager\n\n"
+            f"  Entries : [green]{len(entries)}[/green]   "
+            f"GPG keys : [green]{len(keys)}[/green]   "
+            f"fzf : {'[green]yes[/green]' if DEPS.get('fzf') else '[dim]no[/dim]'}   "
+            f"OTP : {'[green]yes[/green]' if DEPS.get('pyotp') else '[dim]no[/dim]'}\n\n"
+            "Type [bold]help[/bold] for all commands  |  "
+            "[bold]browse[/bold] to pick an entry  |  "
+            "[bold]wizard[/bold] for first-time setup",
+            border_style="cyan",
+        ))
 
-    def do_gpg_list(self, arg):
+    # -- Core commands -------------------------------------------------------
+
+    def do_get(self, arg: str) -> None:
+        """get [entry] [--clip] [--field FIELD]  Show a password entry."""
+        parts = arg.split()
+        entry, clip, field = None, False, None
+        i = 0
+        while i < len(parts):
+            if parts[i] == "--clip":
+                clip = True
+            elif parts[i] == "--field" and i + 1 < len(parts):
+                field = parts[i + 1]
+                i += 1
+            else:
+                entry = parts[i]
+            i += 1
+        cmd_get(entry, clip, field)
+
+    complete_get = _complete_entries
+
+    def do_show(self, arg: str) -> None:
+        """show [entry]  Alias for get."""
+        self.do_get(arg)
+
+    complete_show = _complete_entries
+
+    def do_clip(self, arg: str) -> None:
+        """clip [entry]  Copy password to clipboard with auto-clear."""
+        cmd_get(arg.strip() or None, clip=True)
+
+    complete_clip = _complete_entries
+
+    def do_insert(self, arg: str) -> None:
+        """insert [entry]  Add a new entry with guided prompts."""
+        cmd_insert(arg.strip() or None)
+
+    def do_add(self, arg: str) -> None:
+        """add [entry]  Alias for insert."""
+        self.do_insert(arg)
+
+    def do_generate(self, arg: str) -> None:
+        """generate [entry] [length] [--no-symbols] [--clip]  Generate a password."""
+        parts = arg.split()
+        entry, length, no_symbols, clip = None, None, False, False
+        for p in parts:
+            if p == "--no-symbols":
+                no_symbols = True
+            elif p == "--clip":
+                clip = True
+            elif p.isdigit() and length is None:
+                length = int(p)
+            elif entry is None:
+                entry = p
+        cmd_generate(entry, length, no_symbols, clip)
+
+    complete_generate = _complete_entries
+
+    def do_edit(self, arg: str) -> None:
+        """edit [entry]  Edit an entry in your $EDITOR."""
+        entry = arg.strip() or fuzzy_select(get_all_entries(), "Select entry to edit")
+        if entry:
+            run_command(["pass", "edit", entry], interactive=True)
+
+    complete_edit = _complete_entries
+
+    def do_delete(self, arg: str) -> None:
+        """delete [entry]  Delete a password entry."""
+        entry = arg.strip() or fuzzy_select(get_all_entries(), "Select entry to delete")
+        if not entry:
+            return
+        if Confirm.ask(f"[red]Delete '{entry}'?[/red]", default=False):
+            _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
+            console.print(
+                f"[green]Deleted '{entry}'.[/green]" if rc == 0
+                else f"[red]Error:[/red] {err}"
+            )
+
+    complete_delete = _complete_entries
+
+    def do_browse(self, arg: str) -> None:
+        """browse  Fuzzy-search entries and pick an action."""
+        cmd_browse()
+
+    def do_ls(self, arg: str) -> None:
+        """ls [path]  List all entries."""
+        cmd_args = ["pass", "ls"] + ([arg.strip()] if arg.strip() else [])
+        out, err, rc = run_command(cmd_args)
+        console.print(out if rc == 0 else f"[red]{err}[/red]")
+
+    def do_find(self, arg: str) -> None:
+        """find <term>  Search entries by name."""
+        term = arg.strip() or Prompt.ask("Search term")
+        out, err, rc = run_command(["pass", "find", term])
+        console.print(out if rc == 0 else f"[red]{err}[/red]")
+
+    # -- Power user commands -------------------------------------------------
+
+    def do_otp(self, arg: str) -> None:
+        """otp [entry]  Generate a TOTP code from a stored OTP secret."""
+        cmd_otp(arg.strip() or None)
+
+    complete_otp = _complete_entries
+
+    def do_run(self, arg: str) -> None:
+        """run <entry> -- <command>  Inject entry fields as env vars and run a command."""
+        if " -- " in arg:
+            entry_part, cmd_part = arg.split(" -- ", 1)
+            cmd_run(entry_part.strip(), cmd_part.split())
+        else:
+            console.print("[red]Usage:[/red] run <entry> -- <command>")
+            console.print("[dim]Example: run aws/prod -- aws s3 ls[/dim]")
+
+    def do_health(self, arg: str) -> None:
+        """health  Scan all passwords for strength and duplicates."""
+        cmd_health()
+
+    def do_import(self, arg: str) -> None:
+        """import <file> [format]  Import from Bitwarden/LastPass/1Password CSV."""
+        parts = arg.split()
+        if not parts:
+            console.print("[red]Usage:[/red] import <file> [bitwarden|lastpass|1password|auto]")
+            return
+        cmd_import(parts[0], parts[1] if len(parts) > 1 else "auto")
+
+    def do_sync(self, arg: str) -> None:
+        """sync  Git pull + push the password store."""
+        cmd_sync()
+
+    def do_gitlog(self, arg: str) -> None:
+        """gitlog [n]  Show recent password store git history."""
+        n = int(arg.strip()) if arg.strip().isdigit() else 10
+        cmd_git_log(n)
+
+    # -- Entry management ----------------------------------------------------
+
+    def do_mv(self, arg: str) -> None:
+        """mv <old> <new>  Move or rename an entry."""
+        parts = arg.split()
+        if len(parts) >= 2:
+            old, new = parts[0], parts[1]
+        else:
+            old = Prompt.ask("Source entry")
+            new = Prompt.ask("Destination")
+        _, err, rc = run_command(["pass", "mv", old, new])
+        console.print(
+            f"[green]Moved '{old}' -> '{new}'.[/green]" if rc == 0
+            else f"[red]Error:[/red] {err}"
+        )
+
+    def do_cp(self, arg: str) -> None:
+        """cp <old> <new>  Copy an entry."""
+        parts = arg.split()
+        if len(parts) >= 2:
+            old, new = parts[0], parts[1]
+        else:
+            old = Prompt.ask("Source entry")
+            new = Prompt.ask("Destination")
+        _, err, rc = run_command(["pass", "cp", old, new])
+        console.print(
+            f"[green]Copied '{old}' -> '{new}'.[/green]" if rc == 0
+            else f"[red]Error:[/red] {err}"
+        )
+
+    def do_archive(self, arg: str) -> None:
+        """archive [entry]  Move an entry to the archive/ folder."""
+        entry = arg.strip() or fuzzy_select(get_all_entries(), "Select entry to archive")
+        if not entry:
+            return
+        _, err, rc = run_command(["pass", "mv", entry, f"archive/{entry}"])
+        console.print(
+            f"[green]Archived '{entry}'.[/green]" if rc == 0
+            else f"[red]Error:[/red] {err}"
+        )
+
+    complete_archive = _complete_entries
+
+    def do_restore(self, arg: str) -> None:
+        """restore [entry]  Restore an entry from the archive/ folder."""
+        archived = [e for e in get_all_entries() if e.startswith("archive/")]
+        if not archived:
+            console.print("[yellow]No archived entries found.[/yellow]")
+            return
+        display = [e[len("archive/"):] for e in archived]
+        entry = arg.strip() or fuzzy_select(display, "Select entry to restore")
+        if not entry:
+            return
+        dest = Prompt.ask("Restore to", default=entry)
+        if not dest.strip():
+            console.print("[red]Destination cannot be empty.[/red]")
+            return
+        _, err, rc = run_command(["pass", "mv", f"archive/{entry}", dest])
+        console.print(
+            f"[green]Restored to '{dest}'.[/green]" if rc == 0
+            else f"[red]Error:[/red] {err}"
+        )
+
+    # -- GPG & store setup ---------------------------------------------------
+
+    def do_gpg_list(self, arg: str) -> None:
+        """gpg_list  List all GPG keys."""
         keys = get_gpg_keys()
         if not keys:
             console.print("[red]No GPG keys found.[/red]")
             return
-        table = Table(title="GPG Keys")
-        table.add_column("No.", style="bold")
-        table.add_column("Key ID", style="cyan")
-        table.add_column("User Info", style="magenta")
-        for idx, (key_id, user_info) in enumerate(keys, start=1):
-            table.add_row(str(idx), key_id, user_info)
-        console.print(table)
+        t = Table(title="GPG Keys", box=box.SIMPLE)
+        t.add_column("#", width=3)
+        t.add_column("Key ID", style="cyan")
+        t.add_column("User", style="magenta")
+        for i, (kid, uid) in enumerate(keys, 1):
+            t.add_row(str(i), kid, uid)
+        console.print(t)
 
-    def do_pass_init(self, arg):
+    def do_gpg_gen(self, arg: str) -> None:
+        """gpg_gen  Generate a new GPG key (interactive)."""
+        console.print("[yellow]Tip: RSA 4096, no expiry is recommended.[/yellow]")
+        run_command(["gpg", "--full-generate-key"], interactive=True)
+
+    def do_init(self, arg: str) -> None:
+        """init  Initialize or re-initialize the password store."""
         keys = get_gpg_keys()
         if not keys:
-            console.print("[red]No GPG keys found. You need to generate one first.[/red]")
-            confirm = Prompt.ask("Generate a new GPG key now? (yes/no)", default="yes")
-            if confirm.lower() == "yes":
-                self.do_gpg_gen("")
-                keys = get_gpg_keys()
-                if not keys:
-                    console.print("[red]Still no keys found. Something went wrong.[/red]")
-                    return
-            else:
-                return
-
-        table = Table(title="Choose a GPG key for pass init")
-        table.add_column("No.", style="bold")
-        table.add_column("Key ID", style="cyan")
-        table.add_column("User Info", style="magenta")
-        for idx, (key_id, user_info) in enumerate(keys, start=1):
-            table.add_row(str(idx), key_id, user_info)
-        console.print(table)
-
-        choice = IntPrompt.ask("Enter the number of the key to use", default=1)
-
+            console.print("[red]No GPG keys found. Run 'gpg_gen' first.[/red]")
+            return
+        t = Table(box=box.SIMPLE, show_header=False)
+        t.add_column("#", width=3)
+        t.add_column("Key ID", style="cyan")
+        t.add_column("User")
+        for i, (kid, uid) in enumerate(keys, 1):
+            t.add_row(str(i), kid, uid)
+        console.print(t)
+        choice = IntPrompt.ask("Select key number", default=1)
         if 1 <= choice <= len(keys):
             key_id = keys[choice - 1][0]
-            console.print(f"[yellow]Initializing password store with key:[/yellow] [cyan]{key_id}[/cyan]")
-
-            # Secure command with args list
-            out, err = run_command(["pass", "init", key_id])
-
-            if err and "already initialized" not in err:
-                console.print(f"[red]Error:[/red] {err}")
-            else:
-                self.password_store_initialized = True
-                console.print("[green]Password store initialized successfully![/green]")
-        else:
-            console.print("[red]Invalid selection.[/red]")
-
-        if self.mode == "standard":
-            self.password_management_menu()
-
-    # --- Password Management Commands ---
-
-    def do_pass_insert(self, arg):
-        entry = arg.strip() or Prompt.ask("Enter the name for the new password entry")
-        console.print(f"[yellow]Inserting password entry:[/yellow] [cyan]{entry}[/cyan]")
-
-        console.print("Enter your password (multiline supported). Finish input with Ctrl-D (or Ctrl-Z on Windows).")
-        try:
-            lines = sys.stdin.read()
-        except KeyboardInterrupt:
-            console.print("[red]Insertion cancelled.[/red]")
-            return
-
-        # Secure command with args list and PIPE for input
-        process = subprocess.Popen(
-            ["pass", "insert", "-m", entry],
-            stdin=subprocess.PIPE,
-            text=True
-        )
-        process.communicate(lines)
-
-        if process.returncode == 0:
-            console.print("[green]Password entry inserted successfully![/green]")
-        else:
-            console.print("[red]Failed to insert password entry. Check if GPG is initialized.[/red]")
-
-        if self.mode == "standard":
-            self.password_management_menu()
-
-    def do_pass_get(self, arg):
-        entry = arg.strip() or Prompt.ask("Enter the name of the password entry to retrieve")
-        # Secure command with args list
-        out, err = run_command(["pass", entry])
-
-        if err or not out:
-            console.print(f"[red]Error retrieving entry:[/red] {err}")
-        else:
-            console.print(f"[green]Password entry for {entry}:[/green]\n{out}")
-
-        if self.mode == "standard":
-            self.password_management_menu()
-
-    def do_pass_delete(self, arg):
-        entry = arg.strip() or Prompt.ask("Enter the name of the password entry to delete")
-        confirm = Prompt.ask(f"Are you sure you want to delete '{entry}'? Type YES to confirm", default="NO")
-
-        if confirm != "YES":
-            console.print("[yellow]Deletion cancelled.[/yellow]")
-            return
-
-        # Secure command with args list
-        out, err = run_command(["pass", "rm", "-r", "-f", entry])
-
-        if err:
-            console.print(f"[red]Error deleting entry:[/red] {err}")
-        else:
-            console.print(f"[green]Password entry '{entry}' deleted successfully.[/green]")
-
-    def do_pass_generate(self, arg):
-        """
-        Generate a password for a new or existing entry.
-        Usage: pass_generate <entry_name> [length]
-        """
-        args = arg.split()
-        if not args:
-            entry = Prompt.ask("Enter the name for the password entry")
-            length = IntPrompt.ask("Enter the desired password length", default=18)
-        else:
-            entry = args[0]
-            try:
-                length = int(args[1]) if len(args) > 1 else 18
-            except ValueError:
-                console.print("[red]Error: Password length must be a number.[/red]")
-                if self.mode == "standard":
-                    self.password_management_menu()
-                return
-
-        console.print(f"[yellow]Generating a {length}-character password for entry:[/yellow] [cyan]{entry}[/cyan]")
-
-        command = ["pass", "generate", entry, str(length)]
-        out, err = run_command(command)
-
-        if err:
-            # Enhanced Error Handling for GPG Key Failure
-            if "No public key" in err or "encryption failed" in err:
-                console.print(
-                    "\n[bold red]Error generating password: GPG Public Key Issue![/bold red]")
-                console.print(
-                    "[yellow]It looks like the password store is not initialized or the specified "
-                    "GPG key is not available or correct.[/yellow]")
-                console.print(
-                    "[cyan]Please ensure you have initialized your password store:[/cyan]")
-                console.print("  1. Use [bold]gpg_gen[/bold] to create a key.")
-                console.print("  2. Use [bold]pass_init[/bold] to initialize the store with a key.")
-            else:
-                console.print(f"[red]Error generating password:[/red] {err}")
-        else:
-            console.print("[green]Password generated successfully![/green]")
-
-        if self.mode == "standard":
-            self.password_management_menu()
-
-    def do_pass_edit(self, arg):
-        entry = arg.strip() or Prompt.ask("Enter the name of the password entry to edit")
-        console.print(f"[yellow]Editing password entry:[/yellow] [cyan]{entry}[/cyan]")
-        run_command(["pass", "edit", entry], interactive=True)
-        if self.mode == "standard":
-            self.password_management_menu()
-
-    def do_pass_find(self, arg):
-        """List password entries that match the provided search term(s)."""
-        search_terms = arg.strip()
-        if not search_terms:
-            search_terms = Prompt.ask("Enter search term(s) for password entries")
-
-        out, err = run_command(["pass", "find", search_terms])
-
-        if err:
-            console.print(f"[red]Error finding entries:[/red] {err}")
-        else:
-            console.print(f"[green]Search results for '{search_terms}':[/green]\n{out}")
-
-        if self.mode == "standard":
-            self.password_management_menu()
-
-    def do_pass_cp(self, arg):
-        """Copy a password entry. Usage: pass_cp <old-path> <new-path>"""
-        parts = arg.split()
-        if len(parts) < 2:
-            old_path = Prompt.ask("Enter the source password entry path")
-            new_path = Prompt.ask("Enter the destination password entry path")
-        else:
-            old_path, new_path = parts[0], parts[1]
-
-        out, err = run_command(["pass", "cp", old_path, new_path])
-
-        if err:
-            console.print(f"[red]Error copying entry:[/red] {err}")
-        else:
-            console.print(f"[green]Copied password entry from '{old_path}' to '{new_path}' successfully.[/green]")
-
-        Prompt.ask("Press Enter to return to the Password Management menu")
-        if self.mode == "standard":
-            self.password_management_menu()
-
-    def do_pass_mv(self, arg):
-        """Move or rename a password entry. Usage: pass_mv <old-path> <new-path>"""
-        parts = arg.split()
-        if len(parts) < 2:
-            old_path = Prompt.ask("Enter the old password entry path")
-            new_path = Prompt.ask("Enter the new password entry path")
-        else:
-            old_path, new_path = parts[0], parts[1]
-
-        out, err = run_command(["pass", "mv", old_path, new_path])
-
-        if err:
-            console.print(f"[red]Error moving entry:[/red] {err}")
-        else:
-            console.print(f"[green]Moved password entry from '{old_path}' to '{new_path}' successfully.[/green]")
-
-        Prompt.ask("Press Enter to return to the Password Management menu")
-        if self.mode == "standard":
-            self.password_management_menu()
-
-    def do_pass_show(self, arg):
-        """Show the tree view of stored entries (pass ls)."""
-        out, err = run_command(["pass", "ls"], interactive=False)
-
-        if err or "Password store not initialized" in out:
-            console.print(f"[red]Error listing password entries:[/red] {err or 'Password store not initialized.'}")
-        else:
-            console.print("[green]Password Store Contents:[/green]")
-            console.print(out)
-
-        if self.mode == "standard":
-            self.password_management_menu()
-
-    # --- Archive & Restore Commands ---
-
-    def do_pass_archive(self, arg):
-        """
-        Archives a password entry by moving it to an 'archive' subfolder.
-        Usage: pass_archive <entry_name>
-        """
-        entry = arg.strip() or Prompt.ask("Enter the name of the password entry to archive")
-        archive_path = f"archive/{entry}"
-
-        console.print(
-            f"[yellow]Archiving entry:[/yellow] [cyan]{entry}[/cyan] -> [magenta]{archive_path}[/magenta]")
-
-        # Secure command with args list: pass mv <entry> <archive_path>
-        out, err = run_command(["pass", "mv", entry, archive_path])
-
-        if err:
-            console.print(f"[red]Error archiving entry:[/red] {err}")
-        else:
-            console.print(f"[green]Password entry '{entry}' successfully archived.[/green]")
-
-        if self.mode == "standard":
-            self.password_management_menu()
-
-    def do_pass_restore(self, arg):
-        """
-        Restores an archived password entry (removes it from the 'archive/' subfolder).
-        Usage: pass_restore <archived_entry_name>
-        """
-        # Ensure input is gathered correctly, preventing empty path causing 'pass mv' Usage error (Bug #3)
-        archived_entry = arg.strip() or Prompt.ask(
-            "Enter the name of the archived password to revert (e.g., website/login)")
-
-        # We assume the archived entry is inside the 'archive' folder
-        archived_full_path = f"archive/{archived_entry}"
-
-        console.print(f"\n[yellow]Restoring archived password:[/yellow] [cyan]{archived_full_path}[/cyan]")
-
-        # User prompt to select restore location
-        console.print("1. Root of password store")
-        console.print("2. Specify a subfolder")
-
-        # Handle the selection, ensuring it's a valid integer (Bug #2)
-        try:
-            sub_choice = IntPrompt.ask("Restore archived password to (1 or 2)", default=1)
-        except KeyboardInterrupt:
-            console.print("[yellow]Restoration cancelled.[/yellow]")
-            return
-
-        destination_path = archived_entry  # Default destination (restores to original name in root if 1 is chosen)
-
-        if sub_choice == 2:
-            # Bug fix related: The original error came from trying to move an entry with an empty/invalid new-path.
-            new_subfolder = Prompt.ask("Enter the destination subfolder (e.g., personal/old_logins)")
-            destination_path = new_subfolder.strip()
-            if not destination_path:
-                console.print("[red]Destination subfolder cannot be empty. Restoration cancelled.[/red]")
-                if self.mode == "standard":
-                    self.password_management_menu()
-                return
-
-        # Secure command with args list: pass mv <archived_full_path> <destination_path>
-        out, err = run_command(["pass", "mv", archived_full_path, destination_path])
-
-        if err:
-            # Displaying the pass mv error clearly
-            console.print(f"[red]Error reverting archived password:[/red] {err}")
+            _, err, rc = run_command(["pass", "init", key_id])
             console.print(
-                "[yellow]Ensure the entry exists in the 'archive/' folder and the destination is valid.[/yellow]")
+                f"[green]Initialized with key {key_id}.[/green]" if rc == 0
+                else f"[red]Error:[/red] {err}"
+            )
+
+    def do_wizard(self, arg: str) -> None:
+        """wizard  Run the first-time setup wizard."""
+        cmd_wizard()
+
+    # -- Config --------------------------------------------------------------
+
+    def do_config(self, arg: str) -> None:
+        """config [key] [value]  View or change a config value."""
+        parts = arg.split()
+        if not parts:
+            cmd_config_show()
+        elif len(parts) == 1:
+            val = CONFIG.get(parts[0])
+            console.print(
+                f"{parts[0]} = {val}" if val is not None
+                else f"[red]Unknown key: {parts[0]}[/red]"
+            )
         else:
-            console.print(f"[green]Password entry restored to '{destination_path}' successfully.[/green]")
+            cmd_config_set(parts[0], " ".join(parts[1:]))
 
-        if self.mode == "standard":
-            self.password_management_menu()
+    # -- Misc ----------------------------------------------------------------
 
-    def do_archive(self, arg):
-        # Alias to the real function
-        self.do_pass_archive(arg)
+    def do_help(self, arg: str) -> None:
+        """help  Show this help."""
+        if arg:
+            super().do_help(arg)
+            return
+        sections = {
+            "Core": [
+                ("get [entry] [--clip] [--field F]", "Show a password (or copy to clipboard)"),
+                ("clip [entry]",                     "Copy password to clipboard + auto-clear"),
+                ("insert [entry]",                   "Add new entry with guided prompts"),
+                ("generate [entry] [len]",           "Generate a secure random password"),
+                ("edit [entry]",                     "Open entry in $EDITOR"),
+                ("delete [entry]",                   "Delete an entry"),
+                ("browse",                           "Fuzzy-pick an entry and choose action"),
+                ("ls [path]",                        "List all entries"),
+                ("find <term>",                      "Search entries by name"),
+            ],
+            "Power User": [
+                ("otp [entry]",                      "Generate TOTP code from stored secret"),
+                ("run <entry> -- <cmd>",             "Inject entry fields as env vars and run"),
+                ("health",                           "Password strength + duplicate report"),
+                ("import <file> [format]",           "Import from Bitwarden/LastPass/1Password CSV"),
+                ("sync",                             "Git pull + push the password store"),
+                ("gitlog [n]",                       "Show recent password store git history"),
+            ],
+            "Entry Management": [
+                ("mv <old> <new>",  "Move or rename an entry"),
+                ("cp <old> <new>",  "Copy an entry"),
+                ("archive [entry]", "Move entry to archive/ folder"),
+                ("restore [entry]", "Restore an archived entry"),
+            ],
+            "Setup": [
+                ("wizard",          "First-time setup (GPG key + pass init + git)"),
+                ("init",            "Initialize/re-initialize password store"),
+                ("gpg_gen",         "Generate a new GPG key"),
+                ("gpg_list",        "List existing GPG keys"),
+                ("config [k] [v]",  "View or set a config value"),
+            ],
+        }
+        for section, commands in sections.items():
+            t = Table(title=f"[bold]{section}[/bold]", box=box.SIMPLE, show_header=False,
+                      padding=(0, 2))
+            t.add_column("Command", style="cyan", min_width=34)
+            t.add_column("Description")
+            for name, desc in commands:
+                t.add_row(name, desc)
+            console.print(t)
 
-    # --- Utility Commands ---
+    def do_quit(self, arg: str) -> bool:
+        """quit  Exit PassCLI."""
+        console.print("[dim]Goodbye.[/dim]")
+        return True
 
-    def do_list_all(self, arg):
-        table = Table(title="Command Manual", show_header=True, header_style="bold magenta")
-        table.add_column("Command", style="cyan")
-        table.add_column("Description", style="white")
-        table.add_row("gpg_gen", "Generate a new GPG key with RSA 4096 (interactive)")
-        table.add_row("gpg_list", "List all available GPG keys")
-        table.add_row("pass_init", "Initialize the pass store with a GPG key (guided selection)")
-        table.add_row("pass_generate", "Generate a password for an entry (with GPG error handling)")
-        table.add_row("pass_insert", "Insert a new password entry (multiline supported)")
-        table.add_row("pass_get", "Retrieve a password entry")
-        table.add_row("pass_edit", "Edit a password entry using your editor")
-        table.add_row("pass_show", "Show password entries (list/ls)")
-        table.add_row("pass_find", "Find password entries matching search term(s)")
-        table.add_row("pass_delete", "Delete a password entry")
-        table.add_row("pass_mv", "Move/rename a password entry")
-        table.add_row("pass_cp", "Copy a password entry")
-        table.add_row("pass_archive", "Archive a password entry (moves to archive/ folder)")
-        table.add_row("pass_restore", "Restore an archived password entry (removes from archive/ folder)")
-        table.add_row("git", "Git operations (placeholder)")
-        table.add_row("menu", "Show the main nested menu with numbered options")
-        table.add_row("default_mode", "Switch between CLI and standard modes")
-        table.add_row("list_all", "Display this command manual")
-        table.add_row("quit/exit", "Exit PassCLI with style")
-        console.print(table)
-
-    def do_default_mode(self, arg):
-        """Switch the mode of operation to 'cli' (professional) or 'standard' (menu)."""
-        arg = arg.strip().lower()
-        if arg in ["professional", "cli"]:
-            self.mode = "cli"
-            console.print("[green]Switched to CLI mode ('professional').[/green]")
-        elif arg in ["standard", "menu"]:
-            self.mode = "standard"
-            console.print("[green]Switched to standard mode (menu).[/green]")
-            self.print_main_menu()
-        else:
-            console.print("[red]Invalid mode. Use 'cli' or 'standard'.[/red]")
-
-    def do_quit(self, arg):
-        console.print(
-            "[bold red]PassCLI exiting. If your password’s on a sticky note, I’m silently shaking my head.[/bold red]")
-        sys.exit(0)
-
-    def do_exit(self, arg):
+    def do_exit(self, arg: str) -> bool:
         return self.do_quit(arg)
 
-    def do_git(self, arg):
-        console.print("[yellow]Git operations are a placeholder at this time.[/yellow]")
+    def do_EOF(self, arg: str) -> bool:
+        console.print()
+        return self.do_quit(arg)
 
-    def default(self, line):
-        if self.mode == "standard" and line.strip().isdigit():
-            try:
-                choice = int(line.strip())
-                self.handle_main_menu_choice(choice)
-            except ValueError:
-                console.print(f"[red]Unknown command:[/red] {line}. Type 'help' to see available commands.")
-        else:
-            console.print(f"[red]Unknown command:[/red] {line}. Type 'help' to see available commands.")
-
-    def emptyline(self):
+    def emptyline(self) -> None:
         pass
 
-4
-if __name__ == '__main__':
-    try:
-        PassCLI().cmdloop()
-    except KeyboardInterrupt:
+    def default(self, line: str) -> None:
         console.print(
-            "\n[bold red]Interrupted. PassCLI signing off. If your password is '1234', I am judging you.[/bold red]")
+            f"[red]Unknown command:[/red] {line}  "
+            "— Type [bold]help[/bold] to see available commands."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Direct CLI (argparse)
+# ---------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="passcli",
+        description="PassCLI — A smart pass wrapper for everyone",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  passcli                           Start interactive shell\n"
+            "  passcli get email/gmail           Show a password\n"
+            "  passcli get email/gmail --clip    Copy to clipboard\n"
+            "  passcli insert web/github         Add new entry\n"
+            "  passcli otp web/github            TOTP code\n"
+            "  passcli run aws/prod -- aws s3 ls Inject secrets as env vars\n"
+            "  passcli health                    Password health report\n"
+            "  passcli import export.csv         Import from Bitwarden/LastPass\n"
+            "  passcli sync                      Git pull + push\n"
+            "  passcli wizard                    First-time setup\n"
+        ),
+    )
+    sub = p.add_subparsers(dest="command")
+
+    # get / show
+    for name in ("get", "show"):
+        sp = sub.add_parser(name, help="Retrieve a password entry")
+        sp.add_argument("entry", nargs="?")
+        sp.add_argument("--clip", "-c", action="store_true", help="Copy to clipboard")
+        sp.add_argument("--field", "-f", help="Show a specific field only")
+
+    # clip
+    sp = sub.add_parser("clip", help="Copy password to clipboard")
+    sp.add_argument("entry", nargs="?")
+
+    # insert / add
+    for name in ("insert", "add"):
+        sp = sub.add_parser(name, help="Insert a new password entry")
+        sp.add_argument("entry", nargs="?")
+        sp.add_argument("--raw", action="store_true", help="Read raw content from stdin")
+
+    # generate
+    sp = sub.add_parser("generate", help="Generate a password")
+    sp.add_argument("entry", nargs="?")
+    sp.add_argument("length", nargs="?", type=int)
+    sp.add_argument("--no-symbols", "-n", action="store_true")
+    sp.add_argument("--clip", "-c", action="store_true")
+
+    # edit
+    sp = sub.add_parser("edit", help="Edit an entry")
+    sp.add_argument("entry", nargs="?")
+
+    # delete
+    sp = sub.add_parser("delete", help="Delete an entry")
+    sp.add_argument("entry", nargs="?")
+    sp.add_argument("--force", "-f", action="store_true")
+
+    # browse
+    sub.add_parser("browse", help="Fuzzy-search and interact with entries")
+
+    # health
+    sub.add_parser("health", help="Password health report")
+
+    # otp
+    sp = sub.add_parser("otp", help="Generate TOTP code")
+    sp.add_argument("entry", nargs="?")
+
+    # run
+    sp = sub.add_parser("run", help="Inject entry as env vars and run a command")
+    sp.add_argument("entry")
+    sp.add_argument("cmd", nargs=argparse.REMAINDER)
+
+    # sync
+    sub.add_parser("sync", help="Git pull + push")
+
+    # gitlog
+    sp = sub.add_parser("gitlog", help="Show git history")
+    sp.add_argument("n", nargs="?", type=int, default=10)
+
+    # import
+    sp = sub.add_parser("import", help="Import from CSV")
+    sp.add_argument("file")
+    sp.add_argument("--format", "-f", default="auto",
+                    choices=["auto", "bitwarden", "lastpass", "1password", "generic"])
+
+    # find
+    sp = sub.add_parser("find", help="Find entries by name")
+    sp.add_argument("term")
+
+    # ls
+    sp = sub.add_parser("ls", help="List entries")
+    sp.add_argument("path", nargs="?", default="")
+
+    # mv
+    sp = sub.add_parser("mv", help="Move/rename an entry")
+    sp.add_argument("old")
+    sp.add_argument("new")
+
+    # cp
+    sp = sub.add_parser("cp", help="Copy an entry")
+    sp.add_argument("old")
+    sp.add_argument("new")
+
+    # archive
+    sp = sub.add_parser("archive", help="Archive an entry")
+    sp.add_argument("entry", nargs="?")
+
+    # restore
+    sp = sub.add_parser("restore", help="Restore an archived entry")
+    sp.add_argument("entry", nargs="?")
+
+    # wizard
+    sub.add_parser("wizard", help="First-time setup wizard")
+
+    # config
+    sp = sub.add_parser("config", help="View or set config")
+    sp.add_argument("key", nargs="?")
+    sp.add_argument("value", nargs="?")
+
+    # shell (explicit)
+    sub.add_parser("shell", help="Start interactive shell (default when no command given)")
+
+    return p
+
+
+def _start_shell() -> None:
+    try:
+        PassShell().cmdloop()
+    except KeyboardInterrupt:
+        console.print("\n[dim]Goodbye.[/dim]")
+
+
+def main() -> None:
+    if len(sys.argv) == 1:
+        _start_shell()
+        return
+
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not args.command or args.command == "shell":
+        _start_shell()
+
+    elif args.command in ("get", "show"):
+        cmd_get(args.entry, args.clip, args.field)
+
+    elif args.command == "clip":
+        cmd_get(args.entry, clip=True)
+
+    elif args.command in ("insert", "add"):
+        cmd_insert(args.entry, structured=not getattr(args, "raw", False))
+
+    elif args.command == "generate":
+        cmd_generate(args.entry, args.length, args.no_symbols, args.clip)
+
+    elif args.command == "edit":
+        entry = args.entry or fuzzy_select(get_all_entries(), "Select entry to edit")
+        if entry:
+            run_command(["pass", "edit", entry], interactive=True)
+
+    elif args.command == "delete":
+        entry = args.entry or fuzzy_select(get_all_entries(), "Select entry to delete")
+        if entry:
+            if args.force or Confirm.ask(f"[red]Delete '{entry}'?[/red]", default=False):
+                _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
+                console.print(
+                    f"[green]Deleted '{entry}'.[/green]" if rc == 0
+                    else f"[red]{err}[/red]"
+                )
+
+    elif args.command == "browse":
+        cmd_browse()
+
+    elif args.command == "health":
+        cmd_health()
+
+    elif args.command == "otp":
+        cmd_otp(args.entry)
+
+    elif args.command == "run":
+        remainder = args.cmd
+        if remainder and remainder[0] == "--":
+            remainder = remainder[1:]
+        cmd_run(args.entry, remainder)
+
+    elif args.command == "sync":
+        cmd_sync()
+
+    elif args.command == "gitlog":
+        cmd_git_log(args.n)
+
+    elif args.command == "import":
+        cmd_import(args.file, args.format)
+
+    elif args.command == "find":
+        out, err, rc = run_command(["pass", "find", args.term])
+        console.print(out if rc == 0 else f"[red]{err}[/red]")
+
+    elif args.command == "ls":
+        cmd_args = ["pass", "ls"] + ([args.path] if args.path else [])
+        out, err, rc = run_command(cmd_args)
+        console.print(out if rc == 0 else f"[red]{err}[/red]")
+
+    elif args.command == "mv":
+        _, err, rc = run_command(["pass", "mv", args.old, args.new])
+        console.print(
+            f"[green]Moved '{args.old}' -> '{args.new}'.[/green]" if rc == 0
+            else f"[red]{err}[/red]"
+        )
+
+    elif args.command == "cp":
+        _, err, rc = run_command(["pass", "cp", args.old, args.new])
+        console.print(
+            f"[green]Copied '{args.old}' -> '{args.new}'.[/green]" if rc == 0
+            else f"[red]{err}[/red]"
+        )
+
+    elif args.command == "archive":
+        entry = args.entry or fuzzy_select(get_all_entries(), "Select entry to archive")
+        if entry:
+            _, err, rc = run_command(["pass", "mv", entry, f"archive/{entry}"])
+            console.print(
+                f"[green]Archived '{entry}'.[/green]" if rc == 0
+                else f"[red]{err}[/red]"
+            )
+
+    elif args.command == "restore":
+        archived = [e for e in get_all_entries() if e.startswith("archive/")]
+        display = [e[len("archive/"):] for e in archived]
+        entry = args.entry or fuzzy_select(display, "Select entry to restore")
+        if entry:
+            dest = Prompt.ask("Restore to", default=entry)
+            _, err, rc = run_command(["pass", "mv", f"archive/{entry}", dest])
+            console.print(
+                f"[green]Restored to '{dest}'.[/green]" if rc == 0
+                else f"[red]{err}[/red]"
+            )
+
+    elif args.command == "wizard":
+        cmd_wizard()
+
+    elif args.command == "config":
+        if not args.key:
+            cmd_config_show()
+        elif not args.value:
+            val = CONFIG.get(args.key)
+            console.print(
+                f"{args.key} = {val}" if val is not None
+                else f"[red]Unknown key: {args.key}[/red]"
+            )
+        else:
+            cmd_config_set(args.key, args.value)
+
+
+if __name__ == "__main__":
+    main()
