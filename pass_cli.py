@@ -66,6 +66,8 @@ def load_config() -> Dict:
 
 def save_config(config: Dict) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # 0o600 — owner read/write only; config contains pass_dir path
+    CONFIG_PATH.touch(mode=0o600, exist_ok=True)
     with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2)
 
@@ -122,8 +124,10 @@ def run_command(
     except FileNotFoundError:
         name = command_parts[0] if command_parts else "unknown"
         return "", f"Command not found: '{name}'. Is it installed and in PATH?", 127
-    except Exception as e:
-        return "", str(e), 1
+    except PermissionError as e:
+        return "", f"Permission denied running '{command_parts[0]}': {e}", 126
+    except OSError as e:
+        return "", f"OS error running '{command_parts[0]}': {e}", 1
 
 
 def get_all_entries() -> List[str]:
@@ -765,8 +769,14 @@ def cmd_import(filepath: str, fmt: str = "auto") -> None:
                 skipped += 1
                 continue
 
-            safe_name = name.replace("/", "-").replace(" ", "_").lower()
-            safe_folder = folder.replace("/", "-").replace(" ", "_").lower() if folder else ""
+            safe_name = name.replace("/", "-").replace(" ", "_").replace("..", "-").lower()
+            safe_folder = (
+                folder.replace("/", "-").replace(" ", "_").replace("..", "-").lower()
+                if folder else ""
+            )
+            # Strip leading dots/dashes to prevent hidden files or relative traversal
+            safe_name = safe_name.lstrip(".-") or "unnamed"
+            safe_folder = safe_folder.lstrip(".-")
             entry_path = f"{safe_folder}/{safe_name}" if safe_folder else safe_name
 
             data: Dict[str, str] = {"password": password}
@@ -969,6 +979,8 @@ class PassShell(cmd.Cmd):
     def _setup_history(self) -> None:
         hist = Path.home() / ".config" / "passcli" / "history"
         hist.parent.mkdir(parents=True, exist_ok=True)
+        # 0o600 — owner read/write only; history contains entry names
+        hist.touch(mode=0o600, exist_ok=True)
         try:
             readline.read_history_file(str(hist))
         except FileNotFoundError:
