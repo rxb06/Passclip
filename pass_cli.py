@@ -226,6 +226,67 @@ def fuzzy_select(entries: List[str], prompt_text: str = "Select entry") -> Optio
 # ---------------------------------------------------------------------------
 
 
+def _spawn_clipboard_clear(text: str, timeout: int) -> None:
+    """Spawn a detached process that clears the clipboard after `timeout` seconds.
+
+    A daemon thread would be killed the instant the CLI process exits after
+    copying.  This subprocess uses start_new_session=True so it survives the
+    parent process.  The sensitive text is passed via an environment variable,
+    never as a command-line argument, so it does not appear in `ps` output.
+    """
+    env = os.environ.copy()
+    env["_PASSCLI_CLIP_TEXT"] = text
+    env["_PASSCLI_CLIP_TIMEOUT"] = str(timeout)
+
+    if DEPS.get("pyperclip"):
+        # Compare before clearing so we don't clobber unrelated clipboard content
+        # the user may have copied after us.
+        script = (
+            "import os, time\n"
+            "try:\n"
+            "    import pyperclip\n"
+            "    t = os.environ.get('_PASSCLI_CLIP_TEXT', '')\n"
+            "    s = int(os.environ.get('_PASSCLI_CLIP_TIMEOUT', '45'))\n"
+            "    time.sleep(s)\n"
+            "    if pyperclip.paste() == t:\n"
+            "        pyperclip.copy('')\n"
+            "except Exception:\n"
+            "    pass\n"
+        )
+        try:
+            subprocess.Popen(
+                [sys.executable, "-c", script],
+                env=env,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            return
+        except Exception:
+            pass
+
+    # Native-tool fallback: unconditional clear after timeout.
+    # (No paste-check possible without pyperclip.)
+    for tool, clear_cmd in [
+        ("pbcopy",  f"sleep {timeout} && printf '' | pbcopy"),
+        ("xclip",   f"sleep {timeout} && printf '' | xclip -selection clipboard"),
+        ("wl-copy", f"sleep {timeout} && printf '' | wl-copy"),
+    ]:
+        if shutil.which(tool):
+            try:
+                subprocess.Popen(
+                    ["bash", "-c", clear_cmd],
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                )
+            except Exception:
+                pass
+            return
+
+
 def copy_to_clipboard(text: str, timeout: Optional[int] = None) -> bool:
     """Copy text to clipboard and schedule auto-clear after `timeout` seconds."""
     timeout = timeout if timeout is not None else CONFIG.get("clip_timeout", 45)
@@ -262,26 +323,7 @@ def copy_to_clipboard(text: str, timeout: Optional[int] = None) -> bool:
         f"Auto-clearing in [bold]{timeout}s[/bold]..."
     )
 
-    def _clear():
-        time.sleep(timeout)
-        if DEPS.get("pyperclip"):
-            import pyperclip
-            try:
-                if pyperclip.paste() == text:
-                    pyperclip.copy("")
-            except Exception:
-                pass
-        else:
-            for cmd_args in [["pbcopy"], ["xclip", "-selection", "clipboard"], ["wl-copy"]]:
-                if shutil.which(cmd_args[0]):
-                    try:
-                        subprocess.run(cmd_args, input="", text=True, check=True,
-                                       capture_output=True)
-                    except Exception:
-                        pass
-                    break
-
-    threading.Thread(target=_clear, daemon=True).start()
+    _spawn_clipboard_clear(text, timeout)
     return True
 
 
