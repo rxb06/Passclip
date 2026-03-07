@@ -23,11 +23,15 @@ sudo pacman -S gnupg pass fzf
 ## Python dependencies
 
 ```bash
-pip install rich pyperclip pyotp
+pip install rich cryptography pyperclip pyotp
 ```
 
-`pyperclip` enables clipboard copy with auto-clear. `pyotp` enables TOTP code generation.
-Both are optional — PassCLI will warn you if a feature needs them.
+| Package | Required? | What it enables |
+|---|---|---|
+| `rich` | Yes | All terminal formatting, tables, progress bars |
+| `cryptography` | Yes | AES-256-GCM vault export / import |
+| `pyperclip` | Recommended | Clipboard copy with auto-clear |
+| `pyotp` | Optional | TOTP code generation |
 
 ---
 
@@ -71,6 +75,8 @@ passcli mv web/github personal/gh    # move / rename
 passcli cp web/github web/github-bak # copy
 passcli archive web/old-site         # move to archive/ folder
 passcli restore old-site             # restore from archive/
+passcli export-vault ~/backup.passvault  # export entire store as encrypted vault
+passcli import-vault ~/backup.passvault  # restore store from vault
 ```
 
 ### 2. Interactive shell — persistent REPL with tab completion
@@ -158,6 +164,32 @@ Format is auto-detected from the CSV header. You can also specify it explicitly:
 passcli import export.csv --format bitwarden
 ```
 
+### Encrypted vault backup
+
+Export your entire password store to a single portable file — safe to copy to cloud storage, an external drive, or another machine:
+
+```bash
+passcli export-vault ~/backup.passvault
+# Vault passphrase: ••••••••••••
+# Confirm passphrase: ••••••••••••
+# ╭─ Export Vault ─────────────────────────────╮
+# │ Vault exported successfully.               │
+# │   File:    ~/backup.passvault              │
+# │   Size:    4.2 KB                          │
+# │   Entries: 47                              │
+# │   Cipher:  AES-256-GCM · PBKDF2-SHA256     │
+# ╰────────────────────────────────────────────╯
+```
+
+Restore from the vault on any machine that has PassCLI installed:
+
+```bash
+passcli import-vault ~/backup.passvault
+# Vault passphrase: ••••••••••••
+```
+
+The vault is a single binary file encrypted with **AES-256-GCM**. The key is derived from your passphrase using **PBKDF2-SHA256 with 600,000 iterations**. The file has no meaning without the passphrase — it is safe to store alongside your encrypted password store in cloud storage.
+
 ### Git sync
 ```bash
 passcli sync      # git pull + push in one step
@@ -192,6 +224,8 @@ Config is stored at `~/.config/passcli/config.json`.
 | `cp <old> <new>` | Copy |
 | `archive [entry]` | Move to `archive/` |
 | `restore [entry]` | Restore from `archive/` |
+| `export-vault <file>` | Export entire store as AES-256-GCM encrypted vault |
+| `import-vault <file> [--force]` | Restore store from vault (warns before overwriting) |
 | `otp [entry]` | Generate TOTP code |
 | `run <entry> -- <cmd>` | Inject fields as env vars |
 | `health` | Strength + duplicate report (shows weak and fair passwords) |
@@ -221,3 +255,5 @@ Config is stored at `~/.config/passcli/config.json`.
 - TOTP clipboard auto-clears when the code expires.
 - The `run` command never logs secrets to stdout or shell history.
 - Passwords are never stored in PassCLI — everything goes through `pass` and GPG.
+- Vault files use AES-256-GCM (authenticated encryption) with PBKDF2-SHA256 at 600,000 iterations. The file is meaningless without the passphrase — safe to store in cloud storage alongside your git-backed store.
+- Vault files are written with `0600` permissions (owner read/write only).

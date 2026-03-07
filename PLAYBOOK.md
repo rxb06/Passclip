@@ -13,6 +13,7 @@
 5. [Core concepts](#5-core-concepts)
 6. [The two modes of operation](#6-the-two-modes-of-operation)
 7. [Feature deep-dives](#7-feature-deep-dives)
+   - [export-vault / import-vault](#export-vault--import-vault--encrypted-backup)
 8. [Developer workflows](#8-developer-workflows)
 9. [Normal user workflows](#9-normal-user-workflows)
 10. [Entry naming conventions and organisation](#10-entry-naming-conventions-and-organisation)
@@ -81,6 +82,7 @@ This is clean, fast, and scriptable. If this is all you need, `pass` alone is su
 | Copy username or URL from browse | Not possible without scripting | `browse` → `u` (username) or `l` (URL) |
 | Act on search results | `pass find` shows names, you retype | `find` → select result → action menu |
 | Error diagnostics | Generic error messages | Specific messages: not found / can't decrypt / GPG key error |
+| Portable encrypted backup | Copy the whole `.password-store/` dir (GPG-only per file) | `export-vault` → single AES-256-GCM encrypted file |
 
 ### What PassCLI does NOT do differently
 
@@ -140,6 +142,7 @@ pip install rich pyperclip pyotp
 | Package | Required? | What it enables |
 |---|---|---|
 | `rich` | Yes | All terminal formatting, tables, progress bars |
+| `cryptography` | Yes | AES-256-GCM vault export / import |
 | `pyperclip` | Recommended | Clipboard copy/auto-clear |
 | `pyotp` | Optional | TOTP code generation |
 
@@ -629,6 +632,96 @@ Config is stored at `~/.config/passcli/config.json` with `0600` permissions (own
 
 ---
 
+### export-vault / import-vault — encrypted backup
+
+```bash
+passcli export-vault ~/backup.passvault
+passcli import-vault ~/backup.passvault
+passcli import-vault ~/backup.passvault --force   # skip overwrite prompt
+```
+
+#### Why this exists
+
+Your password store is already encrypted per-entry by GPG. But it is spread across many `.gpg` files in `~/.password-store/`. If you want to:
+- Transfer the store to a new machine without a git remote
+- Make a point-in-time backup to an external drive or cloud storage
+- Hand off a copy of the store to a trusted person temporarily
+
+…you would normally need to tar and GPG-encrypt the whole directory yourself. `export-vault` does this in one step and uses a separate passphrase so the vault can live somewhere different from your GPG key.
+
+#### How it works
+
+**Export:**
+1. PassCLI walks the entire `~/.password-store/` directory (excluding `.git/`)
+2. Compresses everything into an in-memory gzip-compressed tar
+3. Derives a 32-byte AES-256 key from your passphrase using PBKDF2-SHA256 with 600,000 iterations
+4. Encrypts the tar with AES-256-GCM (authenticated encryption — tampering is detected)
+5. Writes a single binary file: `PCV1` magic header + salt + nonce + ciphertext
+6. Sets file permissions to `0600`
+
+**Import:**
+1. Reads the `PCV1` magic header — rejects non-vault files immediately, before asking for a passphrase
+2. Prompts for the passphrase
+3. Decryption failure (wrong passphrase or tampered file) gives a single generic message — no information about which part failed
+4. If your current store has entries, shows a warning with the count and asks to confirm before overwriting
+5. Extracts the tar back to `~/.password-store/`
+
+#### The vault file format
+
+```
+Offset   Size    Field
+------   ----    -----
+0        4       Magic bytes: "PCV1"
+4        32      Salt  (random, for key derivation)
+36       12      Nonce (random, for AES-256-GCM)
+48       N+16    Ciphertext + 16-byte GCM authentication tag
+```
+
+The vault contains your `.gpg` files. Each `.gpg` file is still GPG-encrypted inside the vault — the vault is a second layer of encryption. Without the vault passphrase, the file is opaque. Without your GPG key, the individual entries cannot be decrypted even after unpacking.
+
+#### Practical use
+
+**Machine migration (no git remote):**
+
+```bash
+# On old machine:
+passcli export-vault ~/Desktop/vault.passvault
+# Copy the file to new machine (USB, AirDrop, etc.)
+
+# On new machine (after installing PassCLI and importing your GPG key):
+passcli import-vault ~/Desktop/vault.passvault
+```
+
+**Periodic backup to cloud storage:**
+
+```bash
+# Run monthly or after major changes
+passcli export-vault ~/Dropbox/passcli-backup-$(date +%Y%m).passvault
+```
+
+The file is safe to store in Dropbox, iCloud, or Google Drive — without the passphrase it is opaque ciphertext. Keeping dated backups (by month) lets you roll back if you accidentally delete entries.
+
+**What the `--force` flag does:**
+
+Without `--force`, if `~/.password-store/` already has entries, `import-vault` shows:
+
+```
+╭─ ⚠ Existing Store Detected ─────────────────╮
+│ Your current password store has 47 entries. │
+│ Importing will overwrite files with the     │
+│ same names.                                 │
+╰─────────────────────────────────────────────╯
+Overwrite existing password store? [y/N]:
+```
+
+With `--force`, it proceeds without asking. Use `--force` in scripts or when you are certain.
+
+#### What is NOT included in the vault
+
+The `.git/` directory is excluded. This keeps the vault compact — git history can be megabytes for active stores, but only the encrypted files matter for a backup. When you import a vault on a new machine, `pass git init` will reinitialise git if needed.
+
+---
+
 ## 8. Developer workflows
 
 ### Workflow: Replace .env files entirely
@@ -954,6 +1047,11 @@ gpg --export-secret-keys --armor YOUR_KEY_ID > private-key-backup.asc
 
 **Never put your GPG private key in the password store.** That would be circular. The backup lives separately.
 
+**Take vault backups before GPG key rotation.** If you re-encrypt the store with a new GPG key, create a vault export first in case you need to roll back:
+```bash
+passcli export-vault ~/vault-pre-rotation-$(date +%Y%m%d).passvault
+```
+
 ### Git and sync
 
 **Commit often, sync regularly.** Every time you add or change an entry, `pass` commits automatically. Run `passcli sync` to push those commits.
@@ -988,6 +1086,7 @@ Understanding what PassCLI protects and what it does not is essential.
 - **Clipboard contents** — auto-cleared after a configurable timeout (default 45s). Verified by comparing content before clearing.
 - **Shell history** — stored at `~/.config/passcli/history` with `0600` permissions. Only you can read it.
 - **Config file** — stored at `~/.config/passcli/config.json` with `0600` permissions.
+- **Vault files** — AES-256-GCM authenticated encryption with PBKDF2-SHA256 (600,000 iterations). Tampering is detected. Wrong passphrase gives a single generic error — no oracle to distinguish decryption failure from corruption. Written with `0600` permissions.
 
 ### What is not protected (and what to know about it)
 
@@ -1009,6 +1108,7 @@ Understanding what PassCLI protects and what it does not is essential.
 | Brute force of your passwords | Yes — generated passwords are random and high-entropy |
 | Weak/reused passwords | Yes — `health` command detects these |
 | Forgotten passwords on old accounts | Yes — archive system prevents loss while keeping the store clean |
+| Vault backup intercepted in transit / at rest | Yes — AES-256-GCM; file is opaque without the vault passphrase |
 
 ### What PassCLI is not designed for
 
@@ -1105,6 +1205,24 @@ Entries are skipped if they have no name or no password. Check your CSV:
 - LastPass: "secure notes" and "form fills" have no password field
 
 Run the import and note which entries show `✗` — those are the skipped ones. You can add them manually with `passcli insert`.
+
+### "Decryption failed. Wrong passphrase or corrupted vault."
+
+This message appears when `import-vault` cannot decrypt the vault file. Possible causes:
+
+1. **Wrong passphrase** — the most common cause. PassCLI intentionally gives the same message for wrong passphrase and corrupted file to avoid oracle attacks.
+2. **Corrupted vault file** — if the file was truncated or modified in transit, GCM authentication fails.
+3. **Wrong vault file** — verify the file starts with the `PCV1` magic header:
+   ```bash
+   python3 -c "print(open('backup.passvault', 'rb').read(4))"
+   # Should print: b'PCV1'
+   ```
+
+If you have the correct passphrase and the file is valid, try exporting again from a machine where the store is intact.
+
+### "Not a valid PassCLI vault file."
+
+The file you passed to `import-vault` does not have the `PCV1` header. Either it is not a vault file, or it was created by an incompatible version. Double-check the file path.
 
 ### "Not in sudoers" when trying to create a global command
 

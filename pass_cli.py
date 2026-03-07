@@ -21,6 +21,7 @@ import argparse
 import cmd
 import csv
 import hashlib
+import io
 import json
 import os
 import readline
@@ -29,10 +30,15 @@ import shutil
 import string
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from rich import box
 from rich.console import Console
@@ -355,6 +361,19 @@ def generate_password(length: int = 20, symbols: bool = True) -> str:
     result = list(pw)
     secrets.SystemRandom().shuffle(result)
     return "".join(result)
+
+
+# ---------------------------------------------------------------------------
+# Vault encryption
+# ---------------------------------------------------------------------------
+
+VAULT_MAGIC = b"PCV1"  # 4-byte header identifying PassCLI vault files
+
+
+def _derive_vault_key(passphrase: bytes, salt: bytes) -> bytes:
+    """Derive a 32-byte AES-256 key from a passphrase using PBKDF2-SHA256 (600k iters)."""
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=600_000)
+    return kdf.derive(passphrase)
 
 
 # ---------------------------------------------------------------------------
@@ -986,6 +1005,158 @@ def cmd_browse() -> None:
     _entry_action_menu(entry)
 
 
+def cmd_export_vault(output_path: str) -> None:
+    """Export the entire password store to a single AES-256-GCM encrypted vault file."""
+    pass_dir = Path(CONFIG.get("pass_dir", Path.home() / ".password-store"))
+    if not pass_dir.exists():
+        console.print("[red]Password store not found.[/red]")
+        return
+
+    out = Path(output_path).expanduser().resolve()
+    if out.exists():
+        if not Confirm.ask(f"[yellow]'{out}' already exists. Overwrite?[/yellow]", default=False):
+            return
+
+    # Prompt for passphrase
+    passphrase = Prompt.ask("Vault passphrase", password=True)
+    if not passphrase:
+        console.print("[red]Passphrase cannot be empty.[/red]")
+        return
+    confirm = Prompt.ask("Confirm passphrase", password=True)
+    if passphrase != confirm:
+        console.print("[red]Passphrases do not match.[/red]")
+        return
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Creating vault…", total=None)
+
+        # Build in-memory tar.gz, skipping .git/
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for item in pass_dir.rglob("*"):
+                # Skip the .git directory and everything inside it
+                rel = item.relative_to(pass_dir)
+                if rel.parts and rel.parts[0] == ".git":
+                    continue
+                arcname = Path(".password-store") / rel
+                tar.add(str(item), arcname=str(arcname), recursive=False)
+        plaintext = buf.getvalue()
+
+        progress.update(task, description="Encrypting…")
+
+        # Derive key and encrypt
+        salt = os.urandom(32)
+        nonce = os.urandom(12)
+        key = _derive_vault_key(passphrase.encode(), salt)
+        ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
+
+        progress.update(task, description="Writing vault file…")
+
+        # Write: magic + salt + nonce + ciphertext+tag
+        with open(out, "wb") as f:
+            f.write(VAULT_MAGIC)
+            f.write(salt)
+            f.write(nonce)
+            f.write(ciphertext)
+        os.chmod(out, 0o600)
+
+    size_kb = out.stat().st_size / 1024
+    entry_count = len(list(pass_dir.rglob("*.gpg")))
+    console.print(Panel(
+        f"[bold green]Vault exported successfully.[/bold green]\n\n"
+        f"  [dim]File:[/dim]    {out}\n"
+        f"  [dim]Size:[/dim]    {size_kb:.1f} KB\n"
+        f"  [dim]Entries:[/dim] {entry_count}\n"
+        f"  [dim]Cipher:[/dim]  AES-256-GCM · PBKDF2-SHA256 (600k iters)",
+        border_style="green",
+        title="Export Vault",
+    ))
+
+
+def cmd_import_vault(input_path: str, force: bool = False) -> None:
+    """Restore the password store from an AES-256-GCM encrypted vault file."""
+    inp = Path(input_path).expanduser().resolve()
+    if not inp.exists():
+        console.print(f"[red]Vault file not found: {inp}[/red]")
+        return
+
+    # Read and validate magic header
+    with open(inp, "rb") as f:
+        magic = f.read(4)
+        if magic != VAULT_MAGIC:
+            console.print(
+                "[red]Not a valid PassCLI vault file.[/red]\n"
+                "[dim]Expected magic header 'PCV1'.[/dim]"
+            )
+            return
+        salt = f.read(32)
+        nonce = f.read(12)
+        ciphertext = f.read()
+
+    if len(salt) != 32 or len(nonce) != 12 or not ciphertext:
+        console.print("[red]Vault file is corrupted or truncated.[/red]")
+        return
+
+    # Prompt for passphrase
+    passphrase = Prompt.ask("Vault passphrase", password=True)
+    if not passphrase:
+        console.print("[red]Passphrase cannot be empty.[/red]")
+        return
+
+    # Decrypt
+    try:
+        key = _derive_vault_key(passphrase.encode(), salt)
+        plaintext = AESGCM(key).decrypt(nonce, ciphertext, None)
+    except Exception:
+        console.print("[red]Decryption failed. Wrong passphrase or corrupted vault.[/red]")
+        return
+
+    pass_dir = Path(CONFIG.get("pass_dir", Path.home() / ".password-store"))
+
+    # Warn if existing entries would be overwritten
+    if not force:
+        existing = list(pass_dir.rglob("*.gpg")) if pass_dir.exists() else []
+        if existing:
+            console.print(Panel(
+                f"[yellow]Your current password store has [bold]{len(existing)}[/bold] "
+                f"entr{'y' if len(existing) == 1 else 'ies'}.[/yellow]\n"
+                "Importing will overwrite files with the same names.",
+                border_style="yellow",
+                title="⚠ Existing Store Detected",
+            ))
+            if not Confirm.ask("Overwrite existing password store?", default=False):
+                console.print("[dim]Import cancelled.[/dim]")
+                return
+
+    # Extract tar.gz into the parent of pass_dir
+    # The tar archive has '.password-store/' as its top-level directory
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        progress.add_task("Restoring vault…", total=None)
+        buf = io.BytesIO(plaintext)
+        with tarfile.open(fileobj=buf, mode="r:gz") as tar:
+            tar.extractall(pass_dir.parent)  # noqa: S202  (trusted self-generated archive)
+
+    restored = len(list(pass_dir.rglob("*.gpg")))
+    console.print(Panel(
+        f"[bold green]Vault imported successfully.[/bold green]\n\n"
+        f"  [dim]Source:[/dim]  {inp}\n"
+        f"  [dim]Store:[/dim]   {pass_dir}\n"
+        f"  [dim]Entries:[/dim] {restored} password{'s' if restored != 1 else ''} restored",
+        border_style="green",
+        title="Import Vault",
+    ))
+
+
 def cmd_wizard() -> None:
     """Guided first-time setup: GPG key + pass init + optional git."""
     console.print(Panel(
@@ -1471,6 +1642,23 @@ class PassShell(cmd.Cmd):
                 t.add_row(name, desc)
             console.print(t)
 
+    def do_export_vault(self, arg: str) -> None:
+        """export-vault <file>  Export password store to an AES-encrypted vault file."""
+        parts = arg.split()
+        if not parts:
+            console.print("[yellow]Usage: export-vault <output_file>[/yellow]")
+            return
+        cmd_export_vault(parts[0])
+
+    def do_import_vault(self, arg: str) -> None:
+        """import-vault <file> [--force]  Restore password store from a vault file."""
+        parts = arg.split()
+        if not parts:
+            console.print("[yellow]Usage: import-vault <vault_file> [--force][/yellow]")
+            return
+        force = "--force" in parts or "-f" in parts
+        cmd_import_vault(parts[0], force=force)
+
     def do_quit(self, arg: str) -> bool:
         """quit  Exit PassCLI."""
         console.print("[dim]Goodbye.[/dim]")
@@ -1617,6 +1805,25 @@ def build_parser() -> argparse.ArgumentParser:
     # shell (explicit)
     sub.add_parser("shell", help="Start interactive shell (default when no command given)")
 
+    # export-vault
+    sp = sub.add_parser(
+        "export-vault",
+        help="Export password store to a single AES-256-GCM encrypted vault file",
+    )
+    sp.add_argument("file", help="Output vault file path (e.g. ~/backup.passvault)")
+
+    # import-vault
+    sp = sub.add_parser(
+        "import-vault",
+        help="Restore password store from an AES-256-GCM encrypted vault file",
+    )
+    sp.add_argument("file", help="Path to the vault file to import")
+    sp.add_argument(
+        "--force", "-f",
+        action="store_true",
+        help="Overwrite existing password store without prompting",
+    )
+
     return p
 
 
@@ -1755,6 +1962,12 @@ def main() -> None:
             )
         else:
             cmd_config_set(args.key, args.value)
+
+    elif args.command == "export-vault":
+        cmd_export_vault(args.file)
+
+    elif args.command == "import-vault":
+        cmd_import_vault(args.file, force=args.force)
 
 
 if __name__ == "__main__":
