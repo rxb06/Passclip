@@ -1,7 +1,11 @@
-# PassCLI
+# PassCLI v1.0.0
 
 A feature-rich, smart wrapper for the [`pass`](https://www.passwordstore.org/) password manager.
 Designed for normal users and power users/developers alike.
+
+```bash
+passcli --version   # passcli 1.0.0
+```
 
 ---
 
@@ -45,11 +49,27 @@ python pass_cli.py wizard
 python pass_cli.py
 ```
 
-Make it a global command:
+Make it a global command (no sudo needed):
 
 ```bash
 chmod +x pass_cli.py
-sudo ln -s "$(pwd)/pass_cli.py" /usr/local/bin/passcli
+mkdir -p ~/.local/bin
+ln -sf "$(pwd)/pass_cli.py" ~/.local/bin/passcli
+```
+
+> **Note:** Make sure `~/.local/bin` is on your `PATH`. Add this to `~/.zshrc` or `~/.bashrc` if it isn't already:
+> ```bash
+> export PATH="$HOME/.local/bin:$PATH"
+> ```
+
+---
+
+## PassTUI (C ncurses — in development)
+
+A native C ncurses TUI is in development under `passtui/`. It provides a full keyboard-driven interface with clean GPG passphrase handling (suspend/resume ncurses for pinentry).
+
+```bash
+cd passtui && make && ./passtui
 ```
 
 ---
@@ -248,12 +268,74 @@ Config is stored at `~/.config/passcli/config.json`.
 
 ---
 
+## Shell completions
+
+Tab-completion scripts are provided for bash, zsh, and fish. They complete subcommands, entry names, config keys, and flags.
+
+```bash
+# Bash — add to ~/.bashrc
+source /path/to/completions/passcli.bash
+
+# Zsh — copy to fpath
+cp completions/passcli.zsh ~/.zfunc/_passcli
+# then add to ~/.zshrc:  fpath=(~/.zfunc $fpath); autoload -Uz compinit && compinit
+
+# Fish — copy to completions dir
+cp completions/passcli.fish ~/.config/fish/completions/
+```
+
+---
+
 ## Security notes
 
 - All subprocess calls use list arguments — no `shell=True`, no injection risk.
-- Clipboard is auto-cleared after a configurable timeout (default 45s).
+- Entry names are validated against path traversal (`..`), shell metacharacters, and excessive depth before any write operation.
+- Clipboard is auto-cleared after a configurable timeout (default 45s). Note: if another program overwrites the clipboard before the timer fires, the new content is not cleared. PassCLI checks clipboard content before clearing to avoid erasing unrelated data.
 - TOTP clipboard auto-clears when the code expires.
-- The `run` command never logs secrets to stdout or shell history.
+- The `run` command injects secrets as environment variables into the child process only. The variables are not visible in shell history or `ps` output, but the child process (and anything it spawns) has full access for the duration of execution.
 - Passwords are never stored in PassCLI — everything goes through `pass` and GPG.
+- The interactive shell stores command history in `~/.config/passcli/history`. This file contains command names and entry paths (not passwords). It is created with `0600` permissions.
 - Vault files use AES-256-GCM (authenticated encryption) with PBKDF2-SHA256 at 600,000 iterations. The file is meaningless without the passphrase — safe to store in cloud storage alongside your git-backed store.
+- Vault exports use atomic writes (temp file + rename) to prevent partial files on disk-full or crash.
 - Vault files are written with `0600` permissions (owner read/write only).
+- Entries are backed up to `~/.config/passcli/backups/` before deletion. Backups are plaintext and `0600` — delete them when no longer needed.
+- The interactive shell uses a PID-based lock file (`.passcli.lock`) in the password store to warn about concurrent access.
+
+---
+
+## Troubleshooting
+
+**GPG agent not responding / pinentry hangs**
+```bash
+gpgconf --kill gpg-agent
+gpg-agent --daemon
+```
+If pinentry prompts don't appear in your terminal, set `GPG_TTY`:
+```bash
+export GPG_TTY=$(tty)   # add to ~/.bashrc or ~/.zshrc
+```
+
+**Password store not found**
+PassCLI looks at `~/.password-store` by default. If your store is elsewhere:
+```bash
+passcli config pass_dir /path/to/your/store
+# or set the environment variable:
+export PASSWORD_STORE_DIR=/path/to/your/store
+```
+
+**Clipboard not working**
+PassCLI uses `pyperclip`, which needs a clipboard tool installed:
+- **macOS**: `pbcopy` (built-in)
+- **Linux X11**: `xclip` or `xsel` (`sudo apt install xclip`)
+- **Linux Wayland**: `wl-copy` (`sudo apt install wl-clipboard`)
+- **SSH / headless**: clipboard is not available — use `--field` to print values instead
+
+**`pass` command not found**
+Install the `pass` password manager first — see [System dependencies](#system-dependencies).
+
+---
+
+## Performance notes
+
+- The `health` command decrypts every entry via GPG to check password strength. On large stores (100+ entries) this can take a while — a progress bar shows current status.
+- `browse` and `find` call `pass ls` once and work from the cached list. They do not decrypt entries until you select one.

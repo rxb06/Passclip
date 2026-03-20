@@ -24,6 +24,11 @@ ENV/
 # PassCLI runtime
 ~/.config/passcli/history
 
+# C build artifacts
+passtui/passtui
+passcli/passcli
+*.o
+
 # OS
 .DS_Store
 Thumbs.db

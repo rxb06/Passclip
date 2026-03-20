@@ -4,9 +4,8 @@
 rich>=13.0
 cryptography>=41.0   # AES-256-GCM vault export/import
 
-# Optional — clipboard support (auto-clear after timeout)
-# pip install pyperclip
+# Recommended — clipboard support (auto-clear after timeout)
+pyperclip
 
 # Optional — TOTP/OTP code generation
-# pip install pyotp
 pyotp

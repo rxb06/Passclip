@@ -17,6 +17,8 @@ Usage:
   passcli wizard                   # First-time setup
 """
 
+__version__ = "1.0.0"
+
 import argparse
 import cmd
 import csv
@@ -27,15 +29,18 @@ import os
 import readline
 import secrets
 import shutil
+import signal
 import string
 import subprocess
 import sys
 import tarfile
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import cryptography.exceptions
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -48,6 +53,15 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
 console = Console()
+
+
+def _sigint_handler(sig: int, frame) -> None:
+    """Graceful Ctrl-C: print message and exit cleanly."""
+    console.print("\n[yellow]Interrupted.[/yellow]")
+    sys.exit(130)
+
+
+signal.signal(signal.SIGINT, _sigint_handler)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -138,10 +152,37 @@ def run_command(
         return "", f"OS error running '{command_parts[0]}': {e}", 1
 
 
+def _error(msg: str, hint: str = "") -> None:
+    """Print a consistently formatted error message."""
+    console.print(f"[red]Error:[/red] {msg}")
+    if hint:
+        console.print(f"[dim]{hint}[/dim]")
+
+
+def validate_entry_name(name: str) -> Tuple[bool, str]:
+    """Validate a pass entry name. Returns (ok, error_message)."""
+    if not name or not name.strip():
+        return False, "Entry name cannot be empty."
+    if len(name) > 200:
+        return False, "Entry name too long (max 200 characters)."
+    if ".." in name:
+        return False, "Entry name cannot contain '..'."
+    if name.startswith("/") or name.startswith("-"):
+        return False, "Entry name cannot start with '/' or '-'."
+    if name.count("/") > 10:
+        return False, "Entry name has too many path components (max 10)."
+    # Reject shell metacharacters
+    if any(c in name for c in "`$(){}|;&<>!"):
+        return False, "Entry name contains invalid characters."
+    return True, ""
+
+
 def get_all_entries() -> List[str]:
     """Return all pass entry paths, sorted."""
     pass_dir = Path(CONFIG.get("pass_dir", Path.home() / ".password-store"))
     if not pass_dir.exists():
+        console.print(f"[yellow]Password store not found: {pass_dir}[/yellow]")
+        console.print("[dim]Run 'wizard' to set up, or 'config pass_dir /path/to/store'[/dim]")
         return []
     entries = []
     for f in pass_dir.rglob("*.gpg"):
@@ -537,8 +578,9 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
     """Add a new password entry with guided prompts."""
     if not entry:
         entry = Prompt.ask("[cyan]Entry name[/cyan] (e.g. web/github, email/work)")
-    if not entry.strip():
-        console.print("[red]Entry name cannot be empty.[/red]")
+    ok, err = validate_entry_name(entry)
+    if not ok:
+        _error(err)
         return
 
     if structured:
@@ -601,8 +643,9 @@ def cmd_generate(
     """Generate a random password for an entry."""
     if not entry:
         entry = Prompt.ask("[cyan]Entry name[/cyan]")
-    if not entry.strip():
-        console.print("[red]Entry name cannot be empty.[/red]")
+    ok, err = validate_entry_name(entry)
+    if not ok:
+        _error(err)
         return
     if not length:
         length = IntPrompt.ask("Length", default=CONFIG.get("default_password_length", 20))
@@ -656,6 +699,7 @@ def cmd_health() -> None:
     ) as progress:
         task = progress.add_task("Analysing...", total=len(entries))
         for entry in entries:
+            progress.update(task, description=f"Scanning {entry}...")
             content, error = get_entry_raw(entry)
             if error or not content:
                 errors.append(entry)
@@ -854,20 +898,73 @@ def cmd_git_log(n: int = 10) -> None:
     console.print(Panel(out, title="[bold]Password Store History[/bold]", border_style="dim"))
 
 
-def cmd_import(filepath: str, fmt: str = "auto") -> None:
+def _parse_csv_row(row: Dict[str, str], fmt: str) -> Dict[str, str]:
+    """Extract fields from a CSV row based on format. Returns dict with name, folder, etc."""
+    row = {k.lower().strip(): v.strip() for k, v in row.items() if k}
+    if fmt == "bitwarden":
+        return {
+            "name": row.get("name", ""), "folder": row.get("folder", ""),
+            "username": row.get("login_username", ""), "password": row.get("login_password", ""),
+            "url": row.get("login_uri", ""), "notes": row.get("notes", ""),
+            "otp": row.get("login_totp", ""),
+        }
+    elif fmt == "lastpass":
+        return {
+            "name": row.get("name", ""), "folder": row.get("grouping", ""),
+            "username": row.get("username", ""), "password": row.get("password", ""),
+            "url": row.get("url", ""), "notes": row.get("extra", ""), "otp": "",
+        }
+    elif fmt == "1password":
+        return {
+            "name": row.get("title", ""), "folder": row.get("type", ""),
+            "username": row.get("username", ""), "password": row.get("password", ""),
+            "url": row.get("url", ""), "notes": row.get("notesplaintext", ""),
+            "otp": row.get("totp secret key", ""),
+        }
+    else:  # generic
+        return {
+            "name": row.get("name", row.get("title", "")),
+            "folder": row.get("folder", row.get("group", "")),
+            "username": row.get("username", row.get("login", "")),
+            "password": row.get("password", ""),
+            "url": row.get("url", row.get("uri", "")),
+            "notes": row.get("notes", row.get("extra", "")),
+            "otp": row.get("totp", row.get("otp", "")),
+        }
+
+
+def _sanitize_entry_path(name: str, folder: str) -> Optional[str]:
+    """Sanitize and build entry path from name + folder. Returns None if invalid."""
+    safe_name = name.replace("/", "-").replace(" ", "_").replace("..", "-").lower()
+    safe_folder = (
+        folder.replace("/", "-").replace(" ", "_").replace("..", "-").lower()
+        if folder else ""
+    )
+    safe_name = safe_name.lstrip(".-") or "unnamed"
+    safe_folder = safe_folder.lstrip(".-")
+    entry_path = f"{safe_folder}/{safe_name}" if safe_folder else safe_name
+    ok, _ = validate_entry_name(entry_path)
+    return entry_path if ok else None
+
+
+def cmd_import(filepath: str, fmt: str = "auto", dry_run: bool = False) -> None:
     """
     Import passwords from a CSV export.
     Supports Bitwarden, LastPass, 1Password, and generic CSV formats.
     """
     path = Path(filepath)
     if not path.exists():
-        console.print(f"[red]File not found:[/red] {filepath}")
+        _error(f"File not found: {filepath}")
         return
 
     # Auto-detect format
     if fmt == "auto":
-        with open(path, newline="", encoding="utf-8-sig") as f:
-            header = f.readline().lower()
+        try:
+            with open(path, newline="", encoding="utf-8-sig") as f:
+                header = f.readline().lower()
+        except (OSError, UnicodeDecodeError) as e:
+            _error(f"Cannot read file: {e}")
+            return
         if "login_uri" in header or "bitwarden" in filepath.lower():
             fmt = "bitwarden"
         elif "grouping" in header or "lastpass" in filepath.lower():
@@ -877,87 +974,85 @@ def cmd_import(filepath: str, fmt: str = "auto") -> None:
         else:
             fmt = "generic"
 
-    console.print(f"[bold]Importing[/bold] {filepath} [dim](format: {fmt})[/dim]")
-    imported = skipped = 0
+    if dry_run:
+        console.print(f"[bold]Dry run:[/bold] {filepath} [dim](format: {fmt})[/dim]")
+    else:
+        console.print(f"[bold]Importing[/bold] {filepath} [dim](format: {fmt})[/dim]")
 
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            row = {k.lower().strip(): v.strip() for k, v in row.items() if k}
+    imported = skipped = invalid = 0
+    existing = set(get_all_entries()) if not dry_run else set()
 
-            if fmt == "bitwarden":
-                name = row.get("name", "")
-                folder = row.get("folder", "")
-                username = row.get("login_username", "")
-                password = row.get("login_password", "")
-                url = row.get("login_uri", "")
-                notes = row.get("notes", "")
-                otp = row.get("login_totp", "")
-            elif fmt == "lastpass":
-                name = row.get("name", "")
-                folder = row.get("grouping", "")
-                username = row.get("username", "")
-                password = row.get("password", "")
-                url = row.get("url", "")
-                notes = row.get("extra", "")
-                otp = ""
-            elif fmt == "1password":
-                name = row.get("title", "")
-                folder = row.get("type", "")
-                username = row.get("username", "")
-                password = row.get("password", "")
-                url = row.get("url", "")
-                notes = row.get("notesplaintext", "")
-                otp = row.get("totp secret key", "")
-            else:  # generic
-                name = row.get("name", row.get("title", ""))
-                folder = row.get("folder", row.get("group", ""))
-                username = row.get("username", row.get("login", ""))
-                password = row.get("password", "")
-                url = row.get("url", row.get("uri", ""))
-                notes = row.get("notes", row.get("extra", ""))
-                otp = row.get("totp", row.get("otp", ""))
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                fields = _parse_csv_row(row, fmt)
+                name = fields["name"]
+                password = fields["password"]
 
-            if not name or not password:
-                skipped += 1
-                continue
+                if not name or not password:
+                    skipped += 1
+                    continue
 
-            safe_name = name.replace("/", "-").replace(" ", "_").replace("..", "-").lower()
-            safe_folder = (
-                folder.replace("/", "-").replace(" ", "_").replace("..", "-").lower()
-                if folder else ""
-            )
-            # Strip leading dots/dashes to prevent hidden files or relative traversal
-            safe_name = safe_name.lstrip(".-") or "unnamed"
-            safe_folder = safe_folder.lstrip(".-")
-            entry_path = f"{safe_folder}/{safe_name}" if safe_folder else safe_name
+                entry_path = _sanitize_entry_path(name, fields["folder"])
+                if not entry_path:
+                    invalid += 1
+                    console.print(f"  [yellow]⚠[/yellow] Invalid name: {name}")
+                    continue
 
-            data: Dict[str, str] = {"password": password}
-            if username:
-                data["username"] = username
-            if url:
-                data["url"] = url
-            if notes:
-                data["notes"] = notes
-            if otp:
-                data["otp"] = otp
+                if dry_run:
+                    dup = " [yellow](exists)[/yellow]" if entry_path in existing else ""
+                    console.print(f"  [dim]→[/dim] {entry_path}{dup}")
+                    imported += 1
+                    continue
 
-            proc = subprocess.Popen(
-                ["pass", "insert", "-m", "-f", entry_path],
-                stdin=subprocess.PIPE, text=True,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
-            _, stderr = proc.communicate(format_entry(data))
-            if proc.returncode == 0:
-                imported += 1
-                console.print(f"  [green]✓[/green] {entry_path}")
-            else:
-                skipped += 1
-                console.print(f"  [red]✗[/red] {entry_path}: {stderr.strip()}")
+                if entry_path in existing:
+                    console.print(f"  [yellow]⚠[/yellow] {entry_path} (overwriting)")
 
-    console.print(
-        f"\n[bold green]Done:[/bold green] {imported} imported, {skipped} skipped."
-    )
+                data: Dict[str, str] = {"password": password}
+                for key in ("username", "url", "notes", "otp"):
+                    if fields.get(key):
+                        data[key] = fields[key]
+
+                proc = subprocess.Popen(
+                    ["pass", "insert", "-m", "-f", entry_path],
+                    stdin=subprocess.PIPE, text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                _, stderr = proc.communicate(format_entry(data))
+                if proc.returncode == 0:
+                    imported += 1
+                    console.print(f"  [green]✓[/green] {entry_path}")
+                else:
+                    skipped += 1
+                    console.print(f"  [red]✗[/red] {entry_path}: {stderr.strip()}")
+
+    except (csv.Error, UnicodeDecodeError) as e:
+        _error(f"Failed to parse CSV: {e}")
+        return
+
+    label = "Would import" if dry_run else "Done"
+    parts = [f"{imported} imported"]
+    if skipped:
+        parts.append(f"{skipped} skipped")
+    if invalid:
+        parts.append(f"{invalid} invalid")
+    console.print(f"\n[bold green]{label}:[/bold green] {', '.join(parts)}.")
+
+
+def _backup_entry(entry: str) -> Optional[Path]:
+    """Save entry content to ~/.config/passcli/backups/ before deletion."""
+    backup_dir = Path.home() / ".config" / "passcli" / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    content, _ = get_entry_raw(entry)
+    if content:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe = entry.replace("/", "_")
+        backup = backup_dir / f"{safe}_{ts}.bak"
+        backup.touch(mode=0o600, exist_ok=True)
+        backup.write_text(content)
+        return backup
+    return None
 
 
 def _preview_entry_metadata(entry: str) -> None:
@@ -1099,13 +1194,26 @@ def cmd_export_vault(output_path: str) -> None:
 
         progress.update(task, description="Writing vault file…")
 
-        # Write: magic + salt + nonce + ciphertext+tag
-        with open(out, "wb") as f:
-            f.write(VAULT_MAGIC)
-            f.write(salt)
-            f.write(nonce)
-            f.write(ciphertext)
-        os.chmod(out, 0o600)
+        # Atomic write: temp file + rename to avoid partial files on disk-full
+        import tempfile
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            suffix=".tmp", dir=str(out.parent),
+        )
+        try:
+            with os.fdopen(tmp_fd, "wb") as f:
+                f.write(VAULT_MAGIC)
+                f.write(salt)
+                f.write(nonce)
+                f.write(ciphertext)
+            os.chmod(tmp_path, 0o600)
+            os.rename(tmp_path, str(out))
+        except Exception:
+            # Clean up partial temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     size_kb = out.stat().st_size / 1024
     entry_count = len(list(pass_dir.rglob("*.gpg")))
@@ -1154,8 +1262,11 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
     try:
         key = _derive_vault_key(passphrase.encode(), salt)
         plaintext = AESGCM(key).decrypt(nonce, ciphertext, None)
-    except Exception:
-        console.print("[red]Decryption failed. Wrong passphrase or corrupted vault.[/red]")
+    except cryptography.exceptions.InvalidTag:
+        _error("Wrong passphrase.", "The vault file is intact but the passphrase does not match.")
+        return
+    except Exception as e:
+        _error(f"Decryption failed: {e}", "The vault file may be corrupted.")
         return
 
     pass_dir = Path(CONFIG.get("pass_dir", Path.home() / ".password-store"))
@@ -1320,6 +1431,14 @@ def cmd_config_set(key: str, value: str) -> None:
     except ValueError:
         console.print(f"[red]Expected {original_type.__name__} for '{key}'.[/red]")
         return
+    # Validate pass_dir exists
+    if key == "pass_dir":
+        p = Path(typed_value).expanduser().resolve()
+        if not p.exists():
+            console.print(f"[yellow]Warning: '{p}' does not exist.[/yellow]")
+            if not Confirm.ask("Set anyway?", default=False):
+                return
+        typed_value = str(p)
     CONFIG[key] = typed_value
     save_config(CONFIG)
     console.print(f"[green]Set[/green] {key} = {typed_value}")
@@ -1336,6 +1455,8 @@ class PassShell(cmd.Cmd):
     def __init__(self):
         super().__init__()
         self._setup_history()
+        self._lock_path = Path(CONFIG.get("pass_dir", Path.home() / ".password-store")) / ".passcli.lock"
+        self._acquire_lock()
 
     def _setup_history(self) -> None:
         hist = Path.home() / ".config" / "passcli" / "history"
@@ -1349,6 +1470,28 @@ class PassShell(cmd.Cmd):
         import atexit
         atexit.register(readline.write_history_file, str(hist))
         readline.set_history_length(500)
+
+    def _acquire_lock(self) -> None:
+        """Create lock file to warn about concurrent access."""
+        if self._lock_path.exists():
+            console.print(
+                "[yellow]Warning: Another passcli session may be running.[/yellow]\n"
+                f"[dim]Lock file: {self._lock_path}[/dim]"
+            )
+        try:
+            self._lock_path.write_text(str(os.getpid()))
+        except OSError:
+            pass
+
+    def _release_lock(self) -> None:
+        """Remove lock file on exit."""
+        try:
+            if self._lock_path.exists():
+                # Only remove if we own it
+                if self._lock_path.read_text().strip() == str(os.getpid()):
+                    self._lock_path.unlink()
+        except OSError:
+            pass
 
     def _complete_entries(self, text: str, line: str, begidx: int, endidx: int) -> List[str]:
         return [e for e in get_all_entries() if e.startswith(text)]
@@ -1440,6 +1583,9 @@ class PassShell(cmd.Cmd):
             return
         _preview_entry_metadata(entry)
         if Confirm.ask(f"[red]Delete '{entry}'?[/red]", default=False):
+            backup = _backup_entry(entry)
+            if backup:
+                console.print(f"[dim]Backup saved: {backup}[/dim]")
             _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
             console.print(
                 f"[green]Deleted '{entry}'.[/green]" if rc == 0
@@ -1492,12 +1638,14 @@ class PassShell(cmd.Cmd):
         cmd_health()
 
     def do_import(self, arg: str) -> None:
-        """import <file> [format]  Import from Bitwarden/LastPass/1Password CSV."""
+        """import <file> [format] [--dry-run]  Import from Bitwarden/LastPass/1Password CSV."""
         parts = arg.split()
         if not parts:
-            console.print("[red]Usage:[/red] import <file> [bitwarden|lastpass|1password|auto]")
+            console.print("[red]Usage:[/red] import <file> [bitwarden|lastpass|1password|auto] [--dry-run]")
             return
-        cmd_import(parts[0], parts[1] if len(parts) > 1 else "auto")
+        dry_run = "--dry-run" in parts
+        parts = [p for p in parts if p != "--dry-run"]
+        cmd_import(parts[0], parts[1] if len(parts) > 1 else "auto", dry_run=dry_run)
 
     def do_sync(self, arg: str) -> None:
         """sync  Git pull + push the password store."""
@@ -1703,6 +1851,7 @@ class PassShell(cmd.Cmd):
 
     def do_quit(self, arg: str) -> bool:
         """quit  Exit PassCLI."""
+        self._release_lock()
         console.print("[dim]Goodbye.[/dim]")
         return True
 
@@ -1747,6 +1896,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  passcli wizard                    First-time setup\n"
         ),
     )
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="command")
 
     # get / show
@@ -1809,6 +1959,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("file")
     sp.add_argument("--format", "-f", default="auto",
                     choices=["auto", "bitwarden", "lastpass", "1password", "generic"])
+    sp.add_argument("--dry-run", action="store_true",
+                    help="Preview what would be imported without writing")
 
     # find
     sp = sub.add_parser("find", help="Find entries by name")
@@ -1910,6 +2062,9 @@ def main() -> None:
             if not args.force:
                 _preview_entry_metadata(entry)
             if args.force or Confirm.ask(f"[red]Delete '{entry}'?[/red]", default=False):
+                backup = _backup_entry(entry)
+                if backup:
+                    console.print(f"[dim]Backup saved: {backup}[/dim]")
                 _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
                 console.print(
                     f"[green]Deleted '{entry}'.[/green]" if rc == 0
@@ -1938,7 +2093,7 @@ def main() -> None:
         cmd_git_log(args.n)
 
     elif args.command == "import":
-        cmd_import(args.file, args.format)
+        cmd_import(args.file, args.format, dry_run=getattr(args, "dry_run", False))
 
     elif args.command == "find":
         out, err, rc = run_command(["pass", "find", args.term])
