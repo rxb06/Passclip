@@ -371,7 +371,7 @@ def copy_to_clipboard(text: str, timeout: Optional[int] = None) -> bool:
 # ---------------------------------------------------------------------------
 # Structured entry format
 #
-# Pass stores free-form text. PassCLI treats the first line as the password
+# Passcli stores free-form text. PassCLI treats the first line as the password
 # and subsequent lines as "key: value" metadata (username, url, email, notes).
 # This is compatible with pass-import and most pass extensions.
 # ---------------------------------------------------------------------------

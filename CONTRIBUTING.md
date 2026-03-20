@@ -27,7 +27,7 @@ Thanks for your interest in contributing. Here's how to get involved.
 ```bash
 # Clone the repo
 git clone <repo-url>
-cd Pass
+cd Passcli
 
 # Install dependencies
 pip install rich cryptography pyperclip pyotp
