@@ -191,7 +191,10 @@ For the full security policy, responsible disclosure process, and known limitati
 | **[docs/CHANGELOG.md](docs/CHANGELOG.md)** | Version history and what changed |
 
 ---
-
+## Transparency over AI Usage
+AI was used for code review, bug fixes, security auditing, and documentation structuring for the project. 
+All output was reviewed and validated manually.
+---
 ## License
 
 Licensed under the [GNU General Public License v3.0](LICENSE).
