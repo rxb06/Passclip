@@ -21,12 +21,14 @@ ENV/
 .vscode/
 *.iml
 
-# PassCLI runtime
-~/.config/passcli/history
+# Linters / formatters
+.ruff_cache/
 
-# C build artifacts
-passtui/passtui
-passcli/passcli
+# Claude Code
+.claude/
+
+# C TUI (not part of this release)
+passtui/
 *.o
 
 # OS

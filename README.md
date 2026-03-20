@@ -1,118 +1,157 @@
-# PassCLI v1.0.0
+# PassCLI
 
-A feature-rich, smart wrapper for the [`pass`](https://www.passwordstore.org/) password manager.
-Designed for normal users and power users/developers alike.
+A smart, feature-rich wrapper around [`pass`](https://www.passwordstore.org/) — the standard Unix password manager.
 
-```bash
-passcli --version   # passcli 1.0.0
+Whether you just want to grab a password quickly or you're a developer who needs secrets injected into a build pipeline, PassCLI has you covered. It adds structured entries, clipboard management, TOTP codes, health reports, CSV import, encrypted vault backups, and an interactive shell — all on top of the battle-tested GPG encryption that `pass` already provides.
+
+```
+$ passcli --version
+passcli 1.0.0
 ```
 
 ---
 
-## System dependencies
+## Why does this exist?
+
+GNU `pass` is brilliant in its simplicity — one GPG-encrypted file per password, a directory tree as your database, and git for sync. It's the Unix philosophy done right. But in daily use, that minimalism starts to show its edges:
+
+**What `pass` gives you:**
+- Rock-solid GPG encryption
+- Git-based version control and sync
+- A dead-simple `pass insert` / `pass show` interface
+- A healthy ecosystem of community extensions
+
+**What it doesn't:**
+- There's no structured format for entries. `pass` stores freeform text, so there's no consistent way to attach a username, URL, or notes to a password. Every user invents their own convention, and nothing parses it.
+- No clipboard auto-clear out of the box (the built-in `--clip` clears after 45s on some systems, but it's inconsistent across platforms and doesn't check if the clipboard changed).
+- No password strength feedback. You can generate a password, but `pass` won't tell you if it's weak or if you're reusing it across entries.
+- No health audit. If you have 100 entries and want to know which ones are weak or duplicated, you're on your own.
+- No TOTP support without installing a separate extension (`pass-otp`), and even then it's a separate workflow.
+- Importing from Bitwarden, LastPass, or 1Password means finding `pass-import`, installing it, and hoping the CSV format hasn't changed.
+- No interactive shell. Every operation is a separate command invocation with no tab completion for entry names (unless you set up bash completions yourself).
+- No encrypted backup format that's independent of GPG. If you lose your GPG key, your entire store is unrecoverable.
+
+**What PassCLI adds:**
+
+| Gap in `pass` | What PassCLI does about it |
+|---|---|
+| No structured entries | First line is the password, everything else is `key: value` pairs. Consistent, parseable, compatible with `pass-import`. |
+| Clipboard is fire-and-forget | Auto-clear with a configurable timer. Checks clipboard before clearing so it doesn't wipe something you copied later. |
+| No strength feedback | Shows strength immediately after generating or entering a password. Visual bar, entropy estimate, actionable tips. |
+| No health audit | `passcli health` scans every entry — flags weak passwords, duplicates, and gives you a fix-it list. |
+| TOTP needs an extension | Built in. Add `otp: SECRET` to any entry, run `passcli otp`, get a code. Clipboard auto-clears on expiry. |
+| Importing is painful | `passcli import file.csv` — auto-detects Bitwarden, LastPass, 1Password. Dry-run mode to preview first. |
+| No interactive shell | Full REPL with tab completion, persistent history, and quick-copy shortcuts. |
+| No GPG-independent backup | `export-vault` creates an AES-256-GCM encrypted file. Separate passphrase, separate from GPG. Restore on any machine. |
+| No secret injection for devs | `passcli run entry -- command` injects fields as env vars. No shell history exposure. |
+| Deletes are permanent | Pre-delete backups to `~/.config/passcli/backups/`. Safety net for accidents. |
+| No entry validation | Blocks path traversal, shell metacharacters, and other bad input before it reaches `pass`. |
+
+PassCLI doesn't replace `pass` — it wraps it. Your password store is still a directory of GPG files. You can switch back to plain `pass` at any time and everything still works. There's no lock-in.
+
+---
+
+## Get started in 60 seconds
 
 ```bash
-# macOS
-brew install gnupg pass fzf
+# 1. Install system deps (macOS example — see docs/SETUP.md for Linux)
+brew install gnupg pass
 
-# Ubuntu/Debian
-sudo apt install gnupg2 pass fzf
-
-# Arch
-sudo pacman -S gnupg pass fzf
-```
-
-`fzf` is optional but strongly recommended — it enables the fuzzy interactive entry browser.
-
-## Python dependencies
-
-```bash
+# 2. Install Python deps
 pip install rich cryptography pyperclip pyotp
-```
 
-| Package | Required? | What it enables |
-|---|---|---|
-| `rich` | Yes | All terminal formatting, tables, progress bars |
-| `cryptography` | Yes | AES-256-GCM vault export / import |
-| `pyperclip` | Recommended | Clipboard copy with auto-clear |
-| `pyotp` | Optional | TOTP code generation |
-
----
-
-## Quick start
-
-```bash
-# First-time setup (guided wizard)
+# 3. Run the setup wizard
 python pass_cli.py wizard
 
-# Or start the interactive shell directly
+# 4. You're in
 python pass_cli.py
 ```
 
-Make it a global command (no sudo needed):
+Want to run it as a global command? Two lines:
 
 ```bash
 chmod +x pass_cli.py
-mkdir -p ~/.local/bin
 ln -sf "$(pwd)/pass_cli.py" ~/.local/bin/passcli
 ```
 
-> **Note:** Make sure `~/.local/bin` is on your `PATH`. Add this to `~/.zshrc` or `~/.bashrc` if it isn't already:
-> ```bash
-> export PATH="$HOME/.local/bin:$PATH"
-> ```
+> Make sure `~/.local/bin` is on your `PATH`. If it isn't, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile.
+
+For the full walkthrough (GPG key setup, Linux/Arch instructions, shell completions, troubleshooting), see **[docs/SETUP.md](docs/SETUP.md)**.
 
 ---
 
-## PassTUI (C ncurses — in development)
+## What can it do?
 
-A native C ncurses TUI is in development under `passtui/`. It provides a full keyboard-driven interface with clean GPG passphrase handling (suspend/resume ncurses for pinentry).
-
-```bash
-cd passtui && make && ./passtui
-```
-
----
-
-## Usage
-
-PassCLI works in two ways:
-
-### 1. Direct CLI — one command, then exit
+**Everyday stuff:**
 
 ```bash
 passcli get email/gmail              # show password + metadata
-passcli get email/gmail --clip       # copy to clipboard (auto-clears after 45s)
-passcli get email/gmail --field url  # print just one field
-passcli insert web/github            # add new entry (guided prompts, auto-generate option)
-passcli generate web/github 24       # generate 24-char password (shows password + strength)
-passcli generate web/github --clip   # generate and copy to clipboard
-passcli edit web/github              # open in $EDITOR
-passcli delete web/github            # delete (previews entry, asks for confirmation)
-passcli find gmail                   # search entries by name (select and act on results)
-passcli ls                           # list all entries
-passcli mv web/github personal/gh    # move / rename
-passcli cp web/github web/github-bak # copy
-passcli archive web/old-site         # move to archive/ folder
-passcli restore old-site             # restore from archive/
-passcli export-vault ~/backup.passvault  # export entire store as encrypted vault
-passcli import-vault ~/backup.passvault  # restore store from vault
+passcli get email/gmail --clip       # copy to clipboard, auto-clears in 45s
+passcli insert web/github            # add entry (prompts for fields, can auto-generate)
+passcli find gmail                   # fuzzy search
+passcli browse                       # interactive picker (requires fzf)
+passcli otp web/github               # TOTP code, auto-copied
 ```
 
-### 2. Interactive shell — persistent REPL with tab completion
+**Housekeeping:**
 
 ```bash
-passcli          # or: passcli shell
+passcli health                       # scan all passwords for strength + duplicates
+passcli sync                         # git pull + push in one step
+passcli archive web/old-site         # stash it, don't delete it
+passcli export-vault ~/backup.vault  # AES-256 encrypted backup of everything
 ```
 
-The shell supports tab-completion for all entry names, persists history across sessions, and offers quick-copy prompts after displaying entries.
+**Developer workflows:**
+
+```bash
+passcli run aws/prod -- aws s3 ls    # inject secrets as env vars, no shell history
+passcli import bitwarden_export.csv  # migrate from another manager
+passcli import export.csv --dry-run  # preview before committing
+```
+
+**Interactive shell** — launch with `passcli` or `passcli shell`. You get tab completion, persistent history, and quick-copy shortcuts (`c` for password, `u` for username, `l` for URL).
+
+For deep-dives, real-world workflows, and best practices, see **[docs/GUIDE.md](docs/GUIDE.md)**.
 
 ---
 
-## Feature highlights
+## All commands
 
-### Structured entries
-PassCLI stores entries in a human-readable, portable format:
+| Command | What it does |
+|---|---|
+| `get [entry] [--clip] [--field F]` | Show, copy, or extract a specific field |
+| `clip [entry]` | Copy password to clipboard (auto-clears) |
+| `insert [entry]` | Add new entry with guided prompts |
+| `generate [entry] [len]` | Generate a random password |
+| `edit [entry]` | Open in `$EDITOR` |
+| `delete [entry]` | Delete (previews first, backs up before removing) |
+| `browse` | Fuzzy-pick an entry, then choose an action |
+| `ls` | List everything |
+| `find <term>` | Search by name |
+| `mv <old> <new>` | Move or rename |
+| `cp <old> <new>` | Copy an entry |
+| `archive [entry]` | Move to `archive/` |
+| `restore [entry]` | Bring back from `archive/` |
+| `otp [entry]` | Generate a TOTP code |
+| `run <entry> -- <cmd>` | Inject fields as env vars into a command |
+| `health` | Password strength and duplicate report |
+| `import <file> [--format F] [--dry-run]` | Import from CSV (Bitwarden, LastPass, 1Password) |
+| `export-vault <file>` | Encrypted vault backup |
+| `import-vault <file> [--force]` | Restore from vault |
+| `sync` | Git pull + push |
+| `gitlog [n]` | Recent git history |
+| `config [key] [value]` | View or change settings |
+| `wizard` | First-time setup |
+| `init` | Init or re-init the password store |
+| `gpg_gen` | Generate a new GPG key |
+| `gpg_list` | List GPG keys |
+
+---
+
+## How entries are stored
+
+PassCLI uses the same format as `pass` — GPG-encrypted files, one per entry. Inside each file:
 
 ```
 MyS3cr3tP@ssw0rd
@@ -121,221 +160,42 @@ url: https://github.com
 notes: work account
 ```
 
-The first line is always the password. All other fields are optional `key: value` pairs.
-This is compatible with `pass-import` and most pass extensions.
-
-### Inserting entries with auto-generate
-
-When adding a new entry, leave the password blank to auto-generate one:
-
-```bash
-passcli insert web/github
-# Password (Enter to generate): ↵
-# Length [20]:
-# Include symbols? [Y/n]:
-# Generated: xK#9mR!2pL@vQ8nW$3jF
-# Strength: █████ Very Strong
-```
-
-Password strength feedback is shown immediately after entering or generating a password.
-
-### Password health report
-```bash
-passcli health
-```
-Scans every entry and reports:
-- Strength score (Very Weak → Very Strong) with a visual bar
-- Length
-- Duplicate passwords across entries
-- Detailed tables for both **weak** and **fair** passwords, with actionable tips
-
-### TOTP / OTP codes
-Store your OTP secret in an entry field:
-```
-MyPassword
-otp: JBSWY3DPEHPK3PXP
-```
-Then generate a live code:
-```bash
-passcli otp web/github
-```
-The code is also copied to clipboard and auto-clears when it expires.
-
-### Developer: inject secrets as environment variables
-```bash
-passcli run aws/prod -- aws s3 ls
-```
-Maps each entry field to an env var:
-- `password` → `PASS_PASSWORD`
-- `username` → `PASS_USERNAME`
-- `url` → `PASS_URL`
-- (and so on for any custom field)
-
-Your subprocess never touches the terminal and the secrets don't persist in shell history.
-
-### Import from other password managers
-```bash
-passcli import bitwarden_export.csv
-passcli import lastpass_export.csv
-passcli import 1password_export.csv
-```
-Format is auto-detected from the CSV header. You can also specify it explicitly:
-```bash
-passcli import export.csv --format bitwarden
-```
-
-### Encrypted vault backup
-
-Export your entire password store to a single portable file — safe to copy to cloud storage, an external drive, or another machine:
-
-```bash
-passcli export-vault ~/backup.passvault
-# Vault passphrase: ••••••••••••
-# Confirm passphrase: ••••••••••••
-# ╭─ Export Vault ─────────────────────────────╮
-# │ Vault exported successfully.               │
-# │   File:    ~/backup.passvault              │
-# │   Size:    4.2 KB                          │
-# │   Entries: 47                              │
-# │   Cipher:  AES-256-GCM · PBKDF2-SHA256     │
-# ╰────────────────────────────────────────────╯
-```
-
-Restore from the vault on any machine that has PassCLI installed:
-
-```bash
-passcli import-vault ~/backup.passvault
-# Vault passphrase: ••••••••••••
-```
-
-The vault is a single binary file encrypted with **AES-256-GCM**. The key is derived from your passphrase using **PBKDF2-SHA256 with 600,000 iterations**. The file has no meaning without the passphrase — it is safe to store alongside your encrypted password store in cloud storage.
-
-### Git sync
-```bash
-passcli sync      # git pull + push in one step
-passcli gitlog    # recent commit history
-```
-
-### Configuration
-```bash
-passcli config                            # show all settings
-passcli config clip_timeout 60            # clear clipboard after 60s
-passcli config default_password_length 24 # default generated length
-```
-
-Config is stored at `~/.config/passcli/config.json`.
+First line is always the password. Everything else is optional `key: value` metadata. This format is compatible with `pass-import` and most pass extensions, so you're never locked in.
 
 ---
 
-## All commands
+## Security
 
-| Command | Description |
+PassCLI takes security seriously. Highlights:
+
+- **No shell injection** — all subprocess calls use list arguments, never `shell=True`.
+- **Entry name validation** — blocks path traversal (`..`), shell metacharacters, and other tricks.
+- **Clipboard auto-clear** — passwords are wiped from the clipboard after a configurable timeout.
+- **Atomic vault writes** — no partial files left behind if your disk fills up mid-export.
+- **Pre-delete backups** — entries are saved to `~/.config/passcli/backups/` before deletion.
+- **AES-256-GCM vaults** — encrypted with PBKDF2-SHA256 at 600,000 iterations.
+
+For the full security policy, responsible disclosure process, and known limitations, see **[SECURITY.md](SECURITY.md)**.
+
+---
+
+## Documentation
+
+| Document | Description |
 |---|---|
-| `get [entry] [--clip] [--field F]` | Show a password (or copy/field) |
-| `clip [entry]` | Copy to clipboard with auto-clear |
-| `insert [entry]` | Add new entry (guided prompts, auto-generate option, strength feedback) |
-| `generate [entry] [len]` | Generate a random password (shows password + strength) |
-| `edit [entry]` | Edit in `$EDITOR` |
-| `delete [entry]` | Delete an entry (previews metadata before confirming) |
-| `browse` | Fuzzy-pick entry, choose action (show/copy/username/URL/OTP/edit/delete) |
-| `ls` | List all entries |
-| `find <term>` | Search by name (select and act on results) |
-| `mv <old> <new>` | Move / rename |
-| `cp <old> <new>` | Copy |
-| `archive [entry]` | Move to `archive/` |
-| `restore [entry]` | Restore from `archive/` |
-| `export-vault <file>` | Export entire store as AES-256-GCM encrypted vault |
-| `import-vault <file> [--force]` | Restore store from vault (warns before overwriting) |
-| `otp [entry]` | Generate TOTP code |
-| `run <entry> -- <cmd>` | Inject fields as env vars |
-| `health` | Strength + duplicate report (shows weak and fair passwords) |
-| `import <file>` | Import from CSV |
-| `sync` | Git pull + push |
-| `gitlog [n]` | Git history |
-| `wizard` | First-time setup wizard |
-| `init` | Init / re-init password store |
-| `gpg_gen` | Generate GPG key |
-| `gpg_list` | List GPG keys |
-| `config [key] [value]` | View / set config |
+| **[docs/SETUP.md](docs/SETUP.md)** | Installation, configuration, and troubleshooting |
+| **[docs/GUIDE.md](docs/GUIDE.md)** | Feature deep-dives, workflows, and best practices |
+| **[SECURITY.md](SECURITY.md)** | Security policy, threat model, and disclosure process |
+| **[CONTRIBUTING.md](CONTRIBUTING.md)** | How to contribute — bugs, features, code style |
+| **[docs/DISCLAIMER.md](docs/DISCLAIMER.md)** | Warranty, liability, and what you're responsible for |
+| **[docs/CHANGELOG.md](docs/CHANGELOG.md)** | Version history and what changed |
 
 ---
 
-## UX notes
+## License
 
-- **Contextual error messages** — errors distinguish between "entry not found", "GPG decryption failed", and "key errors" with suggested fixes.
-- **Fuzzy filtering without fzf** — when fzf is unavailable and you have 15+ entries, a text filter prompt narrows the list before showing numbers.
-- **Quick-copy in shell** — after viewing an entry in the interactive shell, press `c` to copy password, `u` for username, or `l` for URL.
+Licensed under the [GNU General Public License v3.0](LICENSE).
 
 ---
 
-## Shell completions
-
-Tab-completion scripts are provided for bash, zsh, and fish. They complete subcommands, entry names, config keys, and flags.
-
-```bash
-# Bash — add to ~/.bashrc
-source /path/to/completions/passcli.bash
-
-# Zsh — copy to fpath
-cp completions/passcli.zsh ~/.zfunc/_passcli
-# then add to ~/.zshrc:  fpath=(~/.zfunc $fpath); autoload -Uz compinit && compinit
-
-# Fish — copy to completions dir
-cp completions/passcli.fish ~/.config/fish/completions/
-```
-
----
-
-## Security notes
-
-- All subprocess calls use list arguments — no `shell=True`, no injection risk.
-- Entry names are validated against path traversal (`..`), shell metacharacters, and excessive depth before any write operation.
-- Clipboard is auto-cleared after a configurable timeout (default 45s). Note: if another program overwrites the clipboard before the timer fires, the new content is not cleared. PassCLI checks clipboard content before clearing to avoid erasing unrelated data.
-- TOTP clipboard auto-clears when the code expires.
-- The `run` command injects secrets as environment variables into the child process only. The variables are not visible in shell history or `ps` output, but the child process (and anything it spawns) has full access for the duration of execution.
-- Passwords are never stored in PassCLI — everything goes through `pass` and GPG.
-- The interactive shell stores command history in `~/.config/passcli/history`. This file contains command names and entry paths (not passwords). It is created with `0600` permissions.
-- Vault files use AES-256-GCM (authenticated encryption) with PBKDF2-SHA256 at 600,000 iterations. The file is meaningless without the passphrase — safe to store in cloud storage alongside your git-backed store.
-- Vault exports use atomic writes (temp file + rename) to prevent partial files on disk-full or crash.
-- Vault files are written with `0600` permissions (owner read/write only).
-- Entries are backed up to `~/.config/passcli/backups/` before deletion. Backups are plaintext and `0600` — delete them when no longer needed.
-- The interactive shell uses a PID-based lock file (`.passcli.lock`) in the password store to warn about concurrent access.
-
----
-
-## Troubleshooting
-
-**GPG agent not responding / pinentry hangs**
-```bash
-gpgconf --kill gpg-agent
-gpg-agent --daemon
-```
-If pinentry prompts don't appear in your terminal, set `GPG_TTY`:
-```bash
-export GPG_TTY=$(tty)   # add to ~/.bashrc or ~/.zshrc
-```
-
-**Password store not found**
-PassCLI looks at `~/.password-store` by default. If your store is elsewhere:
-```bash
-passcli config pass_dir /path/to/your/store
-# or set the environment variable:
-export PASSWORD_STORE_DIR=/path/to/your/store
-```
-
-**Clipboard not working**
-PassCLI uses `pyperclip`, which needs a clipboard tool installed:
-- **macOS**: `pbcopy` (built-in)
-- **Linux X11**: `xclip` or `xsel` (`sudo apt install xclip`)
-- **Linux Wayland**: `wl-copy` (`sudo apt install wl-clipboard`)
-- **SSH / headless**: clipboard is not available — use `--field` to print values instead
-
-**`pass` command not found**
-Install the `pass` password manager first — see [System dependencies](#system-dependencies).
-
----
-
-## Performance notes
-
-- The `health` command decrypts every entry via GPG to check password strength. On large stores (100+ entries) this can take a while — a progress bar shows current status.
-- `browse` and `find` call `pass ls` once and work from the cached list. They do not decrypt entries until you select one.
+*PassCLI is a personal open-source project. It is not audited by a third party. See [docs/DISCLAIMER.md](docs/DISCLAIMER.md) for details.*
