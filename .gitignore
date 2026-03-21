@@ -9,6 +9,7 @@ dist/
 build/
 .eggs/
 *.egg
+*.whl
 
 # Virtual environments
 .venv/
@@ -16,13 +17,23 @@ venv/
 env/
 ENV/
 
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
 # IDE
 .idea/
 .vscode/
 *.iml
+*.swp
+*.swo
+*~
 
 # Linters / formatters
 .ruff_cache/
+.mypy_cache/
 
 # Claude Code
 .claude/
@@ -40,3 +51,7 @@ Thumbs.db
 .env.*
 *.key
 *.pem
+
+# Backup files
+*.bak
+uv.lock

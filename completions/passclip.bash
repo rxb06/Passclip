@@ -1,7 +1,7 @@
-# Bash completion for PassCLI
-# Source this file: source completions/passcli.bash
+# Bash completion for Passclip
+# Source this file: source completions/passclip.bash
 
-_passcli_entries() {
+_passclip_entries() {
     local pass_dir="${PASSWORD_STORE_DIR:-$HOME/.password-store}"
     if [ -d "$pass_dir" ]; then
         find "$pass_dir" -name '*.gpg' -not -path '*/.git/*' 2>/dev/null | \
@@ -9,7 +9,7 @@ _passcli_entries() {
     fi
 }
 
-_passcli() {
+_passclip() {
     local cur prev commands
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
@@ -27,7 +27,7 @@ _passcli() {
 
     case "${COMP_WORDS[1]}" in
         get|show|clip|edit|delete|otp|archive|generate)
-            COMPREPLY=( $(compgen -W "$(_passcli_entries)" -- "$cur") )
+            COMPREPLY=( $(compgen -W "$(_passclip_entries)" -- "$cur") )
             ;;
         import)
             if [[ "$cur" == --* ]]; then
@@ -45,15 +45,15 @@ _passcli() {
             COMPREPLY=( $(compgen -f -- "$cur") )
             ;;
         mv|cp)
-            COMPREPLY=( $(compgen -W "$(_passcli_entries)" -- "$cur") )
+            COMPREPLY=( $(compgen -W "$(_passclip_entries)" -- "$cur") )
             ;;
         restore)
-            local entries=$(_passcli_entries | grep '^archive/' | sed 's|^archive/||')
+            local entries=$(_passclip_entries | grep '^archive/' | sed 's|^archive/||')
             COMPREPLY=( $(compgen -W "$entries" -- "$cur") )
             ;;
     esac
     return 0
 }
 
-complete -F _passcli passcli
-complete -F _passcli pass_cli.py
+complete -F _passclip passclip
+complete -F _passclip passclip.py

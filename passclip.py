@@ -1,23 +1,34 @@
 #!/usr/bin/env python3
 """
-PassCLI — A feature-rich, smart wrapper for the `pass` password manager.
+Passclip — Security-focused CLI interface for managing and accessing secrets.
 
-Designed for normal users and power users/developers alike.
+Built on top of `pass`, designed for engineers who need reliable, script-friendly
+access to credentials across automation, tooling, and infrastructure workflows.
 
-Usage:
-  passcli                          # Start interactive shell
-  passcli get email/gmail          # Show a password
-  passcli get email/gmail --clip   # Copy to clipboard
-  passcli insert web/github        # Add new entry (guided)
-  passcli health                   # Password health report
-  passcli otp web/github           # Generate TOTP code
-  passcli run aws/prod -- aws s3 ls  # Inject secrets as env vars
-  passcli import passwords.csv     # Import from Bitwarden/LastPass
-  passcli sync                     # Git pull + push
-  passcli wizard                   # First-time setup
+Quick copy (the fast path):
+  passclip gmail                    # Fuzzy match → copy password
+  passclip gmail -u                 # Fuzzy match → copy username
+  passclip gmail -o                 # Fuzzy match → copy OTP code
+  passclip gmail -s                 # Fuzzy match → show entry
+
+Full commands:
+  passclip                          # Start interactive shell
+  passclip get email/gmail --clip   # Copy to clipboard
+  passclip insert web/github        # Add new entry (guided)
+  passclip health                   # Password health report
+  passclip otp --add web/github     # Add OTP to an entry
+  passclip run aws/prod -- aws s3 ls  # Inject secrets as env vars
+  passclip import passwords.csv     # Import from Bitwarden/LastPass
+  passclip sync                     # Git pull + push
+  passclip wizard                   # First-time setup
+
+Shell shortcuts (inside the interactive shell):
+  c gmail                           # Copy password (fuzzy)
+  u gmail                           # Copy username (fuzzy)
+  o gmail                           # Copy OTP code (fuzzy)
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 import argparse
 import cmd
@@ -34,7 +45,6 @@ import string
 import subprocess
 import sys
 import tarfile
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -44,7 +54,6 @@ import cryptography.exceptions
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -67,7 +76,7 @@ signal.signal(signal.SIGINT, _sigint_handler)
 # Configuration
 # ---------------------------------------------------------------------------
 
-CONFIG_PATH = Path.home() / ".config" / "passcli" / "config.json"
+CONFIG_PATH = Path.home() / ".config" / "passclip" / "config.json"
 DEFAULT_CONFIG: Dict = {
     "clip_timeout": 45,
     "default_password_length": 20,
@@ -88,10 +97,10 @@ def load_config() -> Dict:
 
 def save_config(config: Dict) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # 0o600 — owner read/write only; config contains pass_dir path
-    CONFIG_PATH.touch(mode=0o600, exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
+    fd = os.open(str(CONFIG_PATH), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(config, f, indent=2)
+    os.chmod(str(CONFIG_PATH), 0o600)  # ensure perms even if file pre-existed
 
 
 CONFIG = load_config()
@@ -171,9 +180,12 @@ def validate_entry_name(name: str) -> Tuple[bool, str]:
         return False, "Entry name cannot start with '/' or '-'."
     if name.count("/") > 10:
         return False, "Entry name has too many path components (max 10)."
-    # Reject shell metacharacters
-    if any(c in name for c in "`$(){}|;&<>!"):
+    # Reject shell metacharacters and dangerous characters
+    if any(c in name for c in "`$(){}|;&<>!\\\x00"):
         return False, "Entry name contains invalid characters."
+    # Reject control characters
+    if any(ord(c) < 32 for c in name):
+        return False, "Entry name contains control characters."
     return True, ""
 
 
@@ -276,8 +288,8 @@ def _spawn_clipboard_clear(text: str, timeout: int) -> None:
     never as a command-line argument, so it does not appear in `ps` output.
     """
     env = os.environ.copy()
-    env["_PASSCLI_CLIP_TEXT"] = text
-    env["_PASSCLI_CLIP_TIMEOUT"] = str(timeout)
+    env["_PASSCLIP_CLIP_TEXT"] = text
+    env["_PASSCLIP_CLIP_TIMEOUT"] = str(timeout)
 
     if DEPS.get("pyperclip"):
         # Compare before clearing so we don't clobber unrelated clipboard content
@@ -286,8 +298,8 @@ def _spawn_clipboard_clear(text: str, timeout: int) -> None:
             "import os, time\n"
             "try:\n"
             "    import pyperclip\n"
-            "    t = os.environ.get('_PASSCLI_CLIP_TEXT', '')\n"
-            "    s = int(os.environ.get('_PASSCLI_CLIP_TIMEOUT', '45'))\n"
+            "    t = os.environ.get('_PASSCLIP_CLIP_TEXT', '')\n"
+            "    s = int(os.environ.get('_PASSCLIP_CLIP_TIMEOUT', '45'))\n"
             "    time.sleep(s)\n"
             "    if pyperclip.paste() == t:\n"
             "        pyperclip.copy('')\n"
@@ -368,10 +380,31 @@ def copy_to_clipboard(text: str, timeout: Optional[int] = None) -> bool:
     return True
 
 
+def _read_clipboard() -> Optional[str]:
+    """Read current clipboard content. Returns None on failure."""
+    if DEPS.get("pyperclip"):
+        import pyperclip
+        try:
+            val = pyperclip.paste()
+            if val:
+                return val.strip()
+        except Exception:
+            pass
+    for cmd_args in [["pbpaste"], ["xclip", "-selection", "clipboard", "-o"], ["wl-paste"]]:
+        if shutil.which(cmd_args[0]):
+            try:
+                r = subprocess.run(cmd_args, capture_output=True, text=True, timeout=3)
+                if r.returncode == 0 and r.stdout.strip():
+                    return r.stdout.strip()
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Structured entry format
 #
-# Passcli stores free-form text. PassCLI treats the first line as the password
+# Passcli stores free-form text. Passclip treats the first line as the password
 # and subsequent lines as "key: value" metadata (username, url, email, notes).
 # This is compatible with pass-import and most pass extensions.
 # ---------------------------------------------------------------------------
@@ -392,11 +425,11 @@ def parse_entry(content: str) -> Dict[str, str]:
 
 def format_entry(data: Dict[str, str]) -> str:
     lines = [data.get("password", "")]
-    for key in ("username", "email", "url"):
+    for key in ("username", "email", "url", "otp"):
         if data.get(key):
             lines.append(f"{key}: {data[key]}")
     # Any extra keys
-    skip = {"password", "username", "email", "url", "notes"}
+    skip = {"password", "username", "email", "url", "otp", "notes"}
     for key, value in data.items():
         if key not in skip and value:
             lines.append(f"{key}: {value}")
@@ -414,9 +447,15 @@ def get_entry_raw(entry: str) -> Tuple[Optional[str], Optional[str]]:
         if "is not in the password store" in lower or (not msg and not out):
             return None, f"Entry '{entry}' not found. Run [bold]ls[/bold] to see available entries."
         if "decryption failed" in lower or "no secret key" in lower:
-            return None, f"Cannot decrypt '{entry}'. Is your GPG key unlocked? Try: gpg --card-status"
+            return (
+                None,
+                f"Cannot decrypt '{entry}'. Is your GPG key unlocked? Try: gpg --card-status",
+            )
         if "public key" in lower or "unusable public key" in lower:
-            return None, f"GPG key error for '{entry}'. Run [bold]gpg_list[/bold] to check your keys."
+            return (
+                None,
+                f"GPG key error for '{entry}'. Run [bold]gpg_list[/bold] to check your keys.",
+            )
         return None, msg or f"Entry '{entry}' not found."
     return out, None
 
@@ -428,6 +467,7 @@ def get_entry_raw(entry: str) -> Tuple[Optional[str], Optional[str]]:
 
 def generate_password(length: int = 20, symbols: bool = True) -> str:
     """Generate a cryptographically secure random password."""
+    length = max(length, 8)  # enforce minimum
     alphabet = string.ascii_letters + string.digits
     if symbols:
         alphabet += string.punctuation
@@ -450,7 +490,7 @@ def generate_password(length: int = 20, symbols: bool = True) -> str:
 # Vault encryption
 # ---------------------------------------------------------------------------
 
-VAULT_MAGIC = b"PCV1"  # 4-byte header identifying PassCLI vault files
+VAULT_MAGIC = b"PCV1"  # 4-byte header identifying Passclip vault files
 
 
 def _derive_vault_key(passphrase: bytes, salt: bytes) -> bytes:
@@ -589,7 +629,9 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
             "Leave password blank to auto-generate one.",
             title="[bold cyan]New Entry[/bold cyan]", border_style="cyan"
         ))
-        password = Prompt.ask("[bold]Password[/bold] (Enter to generate)", password=True, default="")
+        password = Prompt.ask(
+            "[bold]Password[/bold] (Enter to generate)", password=True, default=""
+        )
         if not password:
             length = IntPrompt.ask(
                 "[dim]Length[/dim]",
@@ -604,6 +646,20 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
         email = Prompt.ask("[dim]Email[/dim]", default="")
         url = Prompt.ask("[dim]URL[/dim]", default="")
         notes = Prompt.ask("[dim]Notes[/dim]", default="")
+        otp_secret = ""
+        if DEPS.get("pyotp"):
+            otp_secret = Prompt.ask("[dim]OTP secret[/dim] (Enter to skip)", default="")
+            if otp_secret:
+                import pyotp
+                try:
+                    if otp_secret.startswith("otpauth://"):
+                        pyotp.parse_uri(otp_secret)
+                    else:
+                        pyotp.TOTP(otp_secret.upper().replace(" ", ""))
+                    console.print("[green]OTP secret validated.[/green]")
+                except Exception:
+                    console.print("[yellow]Invalid OTP secret, skipping.[/yellow]")
+                    otp_secret = ""
         data: Dict[str, str] = {"password": password}
         if username:
             data["username"] = username
@@ -611,6 +667,8 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
             data["email"] = email
         if url:
             data["url"] = url
+        if otp_secret:
+            data["otp"] = otp_secret
         if notes:
             data["notes"] = notes
         content = format_entry(data)
@@ -745,7 +803,10 @@ def cmd_health() -> None:
             t.add_row(r["entry"], strength_bar(r["score"], r["color"]) + f" {r['label']}",
                       str(r["len"]), dup)
         console.print(t)
-        console.print("[dim]  Tip: run [bold]generate <entry>[/bold] to replace with a strong password[/dim]")
+        console.print(
+            "[dim]  Tip: run [bold]generate <entry>[/bold] to replace"
+            " with a strong password[/dim]"
+        )
 
     if fair:
         console.print("\n[bold yellow]Fair Passwords[/bold yellow] (consider upgrading):")
@@ -810,7 +871,7 @@ def cmd_otp(entry: Optional[str] = None) -> None:
     if not secret:
         console.print(f"[red]No OTP secret in '{entry}'.[/red]")
         console.print(
-            "[dim]Add a field like [bold]otp: YOUR_SECRET[/bold] to the entry.[/dim]"
+            "[dim]Run [bold]passclip otp --add {entry}[/bold] to set one up.[/dim]"
         )
         return
 
@@ -829,6 +890,123 @@ def cmd_otp(entry: Optional[str] = None) -> None:
         title="[bold]OTP Code[/bold]", border_style="green",
     ))
     copy_to_clipboard(code, timeout=remaining + 2)
+
+
+def _validate_otp_secret(secret: str) -> Optional[str]:
+    """Validate an OTP secret string. Returns error message or None if valid."""
+    import pyotp
+    try:
+        if secret.startswith("otpauth://"):
+            pyotp.parse_uri(secret)
+        else:
+            pyotp.TOTP(secret.upper().replace(" ", ""))
+        return None
+    except Exception as e:
+        return str(e)
+
+
+def cmd_otp_add(entry: Optional[str] = None) -> None:
+    """Add or update an OTP secret on an existing entry."""
+    if not DEPS.get("pyotp"):
+        console.print(
+            "[red]pyotp not installed.[/red] Run: [cyan]pip install pyotp[/cyan]"
+        )
+        return
+
+    import pyotp
+
+    if not entry:
+        entries = get_all_entries()
+        entry = fuzzy_select(entries, "Select entry to add OTP")
+        if not entry:
+            return
+
+    # Check if entry exists
+    content, error = get_entry_raw(entry)
+    if error:
+        console.print(f"[red]Error:[/red] {error}")
+        return
+
+    data = parse_entry(content)
+    existing_otp = (
+        data.get("otp") or data.get("totp") or
+        data.get("secret") or data.get("otpauth")
+    )
+    if existing_otp:
+        console.print(f"[yellow]'{entry}' already has an OTP secret configured.[/yellow]")
+        if not Confirm.ask("Overwrite?", default=False):
+            return
+
+    # Try clipboard first
+    secret = None
+    clip = _read_clipboard()
+    if clip:
+        is_otpauth = clip.startswith("otpauth://")
+        # Check if it looks like a base32 secret (letters A-Z, 2-7, spaces)
+        looks_like_base32 = (
+            len(clip) >= 16 and
+            all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567= " for c in clip.upper())
+        )
+        if is_otpauth or looks_like_base32:
+            preview = clip[:50] + "..." if len(clip) > 50 else clip
+            console.print(f"[dim]Found in clipboard:[/dim] {preview}")
+            if Confirm.ask("Use this as the OTP secret?", default=True):
+                err = _validate_otp_secret(clip)
+                if err:
+                    console.print(
+                        f"[yellow]Clipboard value is not a valid OTP secret: {err}[/yellow]"
+                    )
+                else:
+                    secret = clip
+
+    # Manual input if clipboard didn't work
+    if not secret:
+        console.print(
+            "[dim]Paste your OTP secret (base32 key) or otpauth:// URI.[/dim]"
+        )
+        raw = Prompt.ask("[cyan]OTP secret[/cyan]")
+        if not raw or not raw.strip():
+            console.print("[yellow]Cancelled.[/yellow]")
+            return
+        raw = raw.strip()
+        err = _validate_otp_secret(raw)
+        if err:
+            _error(f"Invalid OTP secret: {err}")
+            return
+        secret = raw
+
+    # Remove old OTP fields, add new one
+    for old_key in ("otp", "totp", "secret", "otpauth"):
+        data.pop(old_key, None)
+    data["otp"] = secret
+
+    # Write back
+    new_content = format_entry(data)
+    proc = subprocess.Popen(
+        ["pass", "insert", "-m", "-f", entry],
+        stdin=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    _, stderr = proc.communicate(new_content)
+    if proc.returncode != 0:
+        _error(f"Failed to save: {stderr.strip()}")
+        return
+
+    # Show the first code as confirmation
+    try:
+        totp = pyotp.parse_uri(secret) if secret.startswith("otpauth://") \
+            else pyotp.TOTP(secret.upper().replace(" ", ""))
+        code = totp.now()
+        remaining = 30 - (int(time.time()) % 30)
+        console.print(Panel(
+            f"[green]OTP configured for[/green] [bold]{entry}[/bold]\n\n"
+            f"[bold green]{code[:3]} {code[3:]}[/bold green]\n"
+            f"[dim]Valid for {remaining}s[/dim]",
+            title="[bold]OTP Added[/bold]", border_style="green",
+        ))
+        copy_to_clipboard(code, timeout=remaining + 2)
+    except Exception:
+        console.print(f"[green]OTP secret saved to '{entry}'.[/green]")
 
 
 def cmd_run(entry: str, command: List[str]) -> None:
@@ -1041,8 +1219,8 @@ def cmd_import(filepath: str, fmt: str = "auto", dry_run: bool = False) -> None:
 
 
 def _backup_entry(entry: str) -> Optional[Path]:
-    """Save entry content to ~/.config/passcli/backups/ before deletion."""
-    backup_dir = Path.home() / ".config" / "passcli" / "backups"
+    """Save entry content to ~/.config/passclip/backups/ before deletion."""
+    backup_dir = Path.home() / ".config" / "passclip" / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
     content, _ = get_entry_raw(entry)
     if content:
@@ -1071,21 +1249,28 @@ def _preview_entry_metadata(entry: str) -> None:
     console.print("\n".join(parts))
 
 
-def _entry_action_menu(entry: str) -> None:
+def _entry_action_menu(entry: str, default_action: str = "s") -> None:
     """Show an action menu for a selected entry and execute the chosen action."""
     console.print(f"\n[dim]Selected:[/dim] [bold]{entry}[/bold]")
-    console.print(
-        "  [cyan]s[/cyan] Show          View full entry details\n"
-        "  [cyan]c[/cyan] Copy          Copy password to clipboard\n"
-        "  [cyan]u[/cyan] Username      Copy username to clipboard\n"
-        "  [cyan]l[/cyan] URL           Copy URL to clipboard\n"
-        "  [cyan]o[/cyan] OTP           Generate TOTP code\n"
-        "  [cyan]e[/cyan] Edit          Open in $EDITOR\n"
-        "  [cyan]d[/cyan] Delete        Delete this entry\n"
-        "  [cyan]q[/cyan] Cancel"
-    )
+
+    # Highlight the default action
+    items = [
+        ("c", "Copy", "Copy password to clipboard"),
+        ("s", "Show", "View full entry details"),
+        ("u", "Username", "Copy username to clipboard"),
+        ("l", "URL", "Copy URL to clipboard"),
+        ("o", "OTP", "Generate TOTP code"),
+        ("e", "Edit", "Open in $EDITOR"),
+        ("d", "Delete", "Delete this entry"),
+        ("q", "Cancel", ""),
+    ]
+    for key, label, desc in items:
+        marker = " ←" if key == default_action else ""
+        desc_str = f"  {desc}" if desc else ""
+        console.print(f"  [cyan]{key}[/cyan] {label:<14}{desc_str}[dim]{marker}[/dim]")
+
     try:
-        action = Prompt.ask("Action", default="s").strip().lower()
+        action = Prompt.ask("Action [Enter=default]", default=default_action).strip().lower()
     except KeyboardInterrupt:
         return
 
@@ -1120,7 +1305,11 @@ def _entry_action_menu(entry: str) -> None:
     elif action == "e":
         run_command(["pass", "edit", entry], interactive=True)
     elif action == "d":
+        _preview_entry_metadata(entry)
         if Confirm.ask(f"[red]Delete '{entry}'?[/red]", default=False):
+            backup = _backup_entry(entry)
+            if backup:
+                console.print(f"[dim]Backup saved: {backup}[/dim]")
             _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
             console.print(
                 f"[green]Deleted '{entry}'.[/green]" if rc == 0
@@ -1139,7 +1328,91 @@ def cmd_browse() -> None:
     if not entry:
         return
 
-    _entry_action_menu(entry)
+    _entry_action_menu(entry, default_action="c")
+
+
+# ---------------------------------------------------------------------------
+# Smart fuzzy copy — the fast path for daily use
+# ---------------------------------------------------------------------------
+
+
+def _fuzzy_match(term: str) -> Optional[str]:
+    """Fuzzy-match a search term against all entries.
+
+    Returns a single entry path, or None if nothing matched / user cancelled.
+    Exact match wins, then substring, then fzf for multiple results.
+    """
+    entries = get_all_entries()
+    if not entries:
+        console.print("[yellow]No entries found.[/yellow]")
+        return None
+
+    low = term.lower()
+
+    # Exact match (with or without folder)
+    for e in entries:
+        if e.lower() == low:
+            return e
+
+    # Substring match
+    matches = [e for e in entries if low in e.lower()]
+    if not matches:
+        _error(f"No entries matching '{term}'.")
+        return None
+
+    if len(matches) == 1:
+        return matches[0]
+
+    # Multiple matches — let user pick
+    return fuzzy_select(matches, f"Matches for '{term}'")
+
+
+def smart_copy(args: List[str]) -> None:
+    """passclip <term> [-u|-o|-s] — the one-liner for daily tasks.
+
+    Default copies password. Flags change what gets copied:
+      -u / --user      copy username
+      -o / --otp       copy OTP code
+      -s / --show      show full entry (no copy)
+    """
+    term: Optional[str] = None
+    mode = "password"
+
+    for a in args:
+        if a in ("-u", "--user"):
+            mode = "username"
+        elif a in ("-o", "--otp"):
+            mode = "otp"
+        elif a in ("-s", "--show"):
+            mode = "show"
+        elif not a.startswith("-"):
+            term = a
+
+    if not term:
+        console.print("[red]Usage:[/red] passclip <search-term> [-u|-o|-s]")
+        return
+
+    entry = _fuzzy_match(term)
+    if not entry:
+        return
+
+    if mode == "password":
+        cmd_get(entry, clip=True)
+    elif mode == "username":
+        content, error = get_entry_raw(entry)
+        if error:
+            _error(error)
+            return
+        data = parse_entry(content)
+        val = data.get("username") or data.get("email", "")
+        if val:
+            copy_to_clipboard(val)
+        else:
+            console.print(f"[yellow]No username found in '{entry}'.[/yellow]")
+    elif mode == "otp":
+        cmd_otp(entry)
+    elif mode == "show":
+        cmd_get(entry)
 
 
 def cmd_export_vault(output_path: str) -> None:
@@ -1240,7 +1513,7 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
         magic = f.read(4)
         if magic != VAULT_MAGIC:
             console.print(
-                "[red]Not a valid PassCLI vault file.[/red]\n"
+                "[red]Not a valid Passclip vault file.[/red]\n"
                 "[dim]Expected magic header 'PCV1'.[/dim]"
             )
             return
@@ -1297,7 +1570,21 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
         progress.add_task("Restoring vault…", total=None)
         buf = io.BytesIO(plaintext)
         with tarfile.open(fileobj=buf, mode="r:gz") as tar:
-            tar.extractall(pass_dir.parent)  # noqa: S202  (trusted self-generated archive)
+            # Validate all members to prevent path traversal attacks
+            extract_root = pass_dir.parent.resolve()
+            safe_members = []
+            for member in tar.getmembers():
+                target = (extract_root / member.name).resolve()
+                if not str(target).startswith(str(extract_root)):
+                    _error(
+                        f"Path traversal detected in vault: {member.name}",
+                        "This vault file may be malicious. Import aborted.",
+                    )
+                    return
+                if member.name.startswith("/") or "\x00" in member.name:
+                    continue  # skip absolute paths and null bytes
+                safe_members.append(member)
+            tar.extractall(extract_root, members=safe_members)
 
     restored = len(list(pass_dir.rglob("*.gpg")))
     console.print(Panel(
@@ -1313,7 +1600,7 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
 def cmd_wizard() -> None:
     """Guided first-time setup: GPG key + pass init + optional git."""
     console.print(Panel(
-        "[bold cyan]PassCLI Setup Wizard[/bold cyan]\n\n"
+        "[bold cyan]Passclip Setup Wizard[/bold cyan]\n\n"
         "This wizard will set up your GPG key and password store step by step.",
         border_style="cyan",
     ))
@@ -1388,18 +1675,18 @@ def cmd_wizard() -> None:
     console.print(Panel(
         "[bold green]All done![/bold green]\n\n"
         "Quick reference:\n"
-        "  [cyan]passcli[/cyan]                 — open interactive shell\n"
-        "  [cyan]passcli get <entry>[/cyan]      — show a password\n"
-        "  [cyan]passcli get <entry> --clip[/cyan] — copy to clipboard\n"
-        "  [cyan]passcli insert <entry>[/cyan]   — add a new entry\n"
-        "  [cyan]passcli health[/cyan]           — password health report\n"
-        "  [cyan]passcli --help[/cyan]           — all commands",
+        "  [cyan]passclip gmail[/cyan]            — copy password (fuzzy match)\n"
+        "  [cyan]passclip gmail -u[/cyan]         — copy username\n"
+        "  [cyan]passclip gmail -o[/cyan]         — copy OTP code\n"
+        "  [cyan]passclip insert <entry>[/cyan]   — add a new entry\n"
+        "  [cyan]passclip[/cyan]                  — open interactive shell\n"
+        "  [cyan]passclip --help[/cyan]           — all commands",
         border_style="green",
     ))
 
 
 def cmd_config_show() -> None:
-    t = Table(title="PassCLI Config", box=box.SIMPLE)
+    t = Table(title="Passclip Config", box=box.SIMPLE)
     t.add_column("Key", style="cyan")
     t.add_column("Value")
     t.add_column("Description", style="dim")
@@ -1450,16 +1737,17 @@ def cmd_config_set(key: str, value: str) -> None:
 
 
 class PassShell(cmd.Cmd):
-    prompt = "passcli> "
+    prompt = "passclip> "
 
     def __init__(self):
         super().__init__()
         self._setup_history()
-        self._lock_path = Path(CONFIG.get("pass_dir", Path.home() / ".password-store")) / ".passcli.lock"
+        pass_dir = CONFIG.get("pass_dir", Path.home() / ".password-store")
+        self._lock_path = Path(pass_dir) / ".passclip.lock"
         self._acquire_lock()
 
     def _setup_history(self) -> None:
-        hist = Path.home() / ".config" / "passcli" / "history"
+        hist = Path.home() / ".config" / "passclip" / "history"
         hist.parent.mkdir(parents=True, exist_ok=True)
         # 0o600 — owner read/write only; history contains entry names
         hist.touch(mode=0o600, exist_ok=True)
@@ -1475,7 +1763,7 @@ class PassShell(cmd.Cmd):
         """Create lock file to warn about concurrent access."""
         if self._lock_path.exists():
             console.print(
-                "[yellow]Warning: Another passcli session may be running.[/yellow]\n"
+                "[yellow]Warning: Another passclip session may be running.[/yellow]\n"
                 f"[dim]Lock file: {self._lock_path}[/dim]"
             )
         try:
@@ -1500,16 +1788,58 @@ class PassShell(cmd.Cmd):
         entries = get_all_entries()
         keys = get_gpg_keys()
         console.print(Panel(
-            "[bold cyan]PassCLI[/bold cyan] — Smart Password Manager\n\n"
+            "[bold cyan]Passclip[/bold cyan] — Smart Password Manager\n\n"
             f"  Entries : [green]{len(entries)}[/green]   "
             f"GPG keys : [green]{len(keys)}[/green]   "
             f"fzf : {'[green]yes[/green]' if DEPS.get('fzf') else '[dim]no[/dim]'}   "
             f"OTP : {'[green]yes[/green]' if DEPS.get('pyotp') else '[dim]no[/dim]'}\n\n"
+            "Quick: [bold]c[/bold] gmail (copy pw)  |  "
+            "[bold]u[/bold] gmail (username)  |  "
+            "[bold]o[/bold] gmail (OTP)\n"
             "Type [bold]help[/bold] for all commands  |  "
             "[bold]browse[/bold] to pick an entry  |  "
-            "[bold]wizard[/bold] for first-time setup",
+            "[bold]wizard[/bold] for setup",
             border_style="cyan",
         ))
+
+    # -- Quick shortcuts (single-letter daily drivers) ----------------------
+
+    def do_c(self, arg: str) -> None:
+        """c [term]  Quick copy password (fuzzy search)."""
+        term = arg.strip()
+        if not term:
+            # No term — browse and copy
+            entry = fuzzy_select(get_all_entries(), "Copy password")
+            if entry:
+                cmd_get(entry, clip=True)
+            return
+        entry = _fuzzy_match(term)
+        if entry:
+            cmd_get(entry, clip=True)
+
+    def do_u(self, arg: str) -> None:
+        """u [term]  Quick copy username (fuzzy search)."""
+        term = arg.strip()
+        entry = _fuzzy_match(term) if term else fuzzy_select(get_all_entries(), "Copy username")
+        if not entry:
+            return
+        content, error = get_entry_raw(entry)
+        if error:
+            _error(error)
+            return
+        data = parse_entry(content)
+        val = data.get("username") or data.get("email", "")
+        if val:
+            copy_to_clipboard(val)
+        else:
+            console.print(f"[yellow]No username found in '{entry}'.[/yellow]")
+
+    def do_o(self, arg: str) -> None:
+        """o [term]  Quick copy OTP code (fuzzy search)."""
+        term = arg.strip()
+        entry = _fuzzy_match(term) if term else fuzzy_select(get_all_entries(), "Copy OTP")
+        if entry:
+            cmd_otp(entry)
 
     # -- Core commands -------------------------------------------------------
 
@@ -1619,8 +1949,12 @@ class PassShell(cmd.Cmd):
     # -- Power user commands -------------------------------------------------
 
     def do_otp(self, arg: str) -> None:
-        """otp [entry]  Generate a TOTP code from a stored OTP secret."""
-        cmd_otp(arg.strip() or None)
+        """otp [add] [entry]  Generate TOTP code, or 'otp add' to set up OTP."""
+        parts = arg.strip().split(None, 1)
+        if parts and parts[0] == "add":
+            cmd_otp_add(parts[1].strip() if len(parts) > 1 else None)
+        else:
+            cmd_otp(arg.strip() or None)
 
     complete_otp = _complete_entries
 
@@ -1641,7 +1975,10 @@ class PassShell(cmd.Cmd):
         """import <file> [format] [--dry-run]  Import from Bitwarden/LastPass/1Password CSV."""
         parts = arg.split()
         if not parts:
-            console.print("[red]Usage:[/red] import <file> [bitwarden|lastpass|1password|auto] [--dry-run]")
+            console.print(
+                "[red]Usage:[/red] import <file>"
+                " [bitwarden|lastpass|1password|auto] [--dry-run]"
+            )
             return
         dry_run = "--dry-run" in parts
         parts = [p for p in parts if p != "--dry-run"]
@@ -1666,6 +2003,10 @@ class PassShell(cmd.Cmd):
         else:
             old = Prompt.ask("Source entry")
             new = Prompt.ask("Destination")
+        ok, err_msg = validate_entry_name(new)
+        if not ok:
+            _error(err_msg)
+            return
         _, err, rc = run_command(["pass", "mv", old, new])
         console.print(
             f"[green]Moved '{old}' -> '{new}'.[/green]" if rc == 0
@@ -1680,6 +2021,10 @@ class PassShell(cmd.Cmd):
         else:
             old = Prompt.ask("Source entry")
             new = Prompt.ask("Destination")
+        ok, err_msg = validate_entry_name(new)
+        if not ok:
+            _error(err_msg)
+            return
         _, err, rc = run_command(["pass", "cp", old, new])
         console.print(
             f"[green]Copied '{old}' -> '{new}'.[/green]" if rc == 0
@@ -1710,8 +2055,9 @@ class PassShell(cmd.Cmd):
         if not entry:
             return
         dest = Prompt.ask("Restore to", default=entry)
-        if not dest.strip():
-            console.print("[red]Destination cannot be empty.[/red]")
+        ok, err_msg = validate_entry_name(dest)
+        if not ok:
+            _error(err_msg)
             return
         _, err, rc = run_command(["pass", "mv", f"archive/{entry}", dest])
         console.print(
@@ -1790,6 +2136,11 @@ class PassShell(cmd.Cmd):
             super().do_help(arg)
             return
         sections = {
+            "Quick Shortcuts": [
+                ("c [term]",                         "Copy password (fuzzy search)"),
+                ("u [term]",                         "Copy username (fuzzy search)"),
+                ("o [term]",                         "Copy OTP code (fuzzy search)"),
+            ],
             "Core": [
                 ("get [entry] [--clip] [--field F]", "Show a password (or copy to clipboard)"),
                 ("clip [entry]",                     "Copy password to clipboard + auto-clear"),
@@ -1797,15 +2148,16 @@ class PassShell(cmd.Cmd):
                 ("generate [entry] [len]",           "Generate a secure random password"),
                 ("edit [entry]",                     "Open entry in $EDITOR"),
                 ("delete [entry]",                   "Delete an entry"),
-                ("browse",                           "Fuzzy-pick an entry and choose action"),
+                ("browse",                           "Fuzzy-pick an entry → copy (default)"),
                 ("ls [path]",                        "List all entries"),
                 ("find <term>",                      "Search entries by name"),
             ],
             "Power User": [
                 ("otp [entry]",                      "Generate TOTP code from stored secret"),
+                ("otp --add [entry]",                "Add/update OTP secret on an entry"),
                 ("run <entry> -- <cmd>",             "Inject entry fields as env vars and run"),
                 ("health",                           "Password strength + duplicate report"),
-                ("import <file> [format]",           "Import from Bitwarden/LastPass/1Password CSV"),
+                ("import <file> [format]",           "Import from Bitwarden/LastPass/1Password"),
                 ("sync",                             "Git pull + push the password store"),
                 ("gitlog [n]",                       "Show recent password store git history"),
             ],
@@ -1850,7 +2202,7 @@ class PassShell(cmd.Cmd):
         cmd_import_vault(parts[0], force=force)
 
     def do_quit(self, arg: str) -> bool:
-        """quit  Exit PassCLI."""
+        """quit  Exit Passclip."""
         self._release_lock()
         console.print("[dim]Goodbye.[/dim]")
         return True
@@ -1879,21 +2231,25 @@ class PassShell(cmd.Cmd):
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="passcli",
-        description="PassCLI — A smart pass wrapper for everyone",
+        prog="passclip",
+        description="Passclip — Security-focused CLI for managing secrets via pass",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Examples:\n"
-            "  passcli                           Start interactive shell\n"
-            "  passcli get email/gmail           Show a password\n"
-            "  passcli get email/gmail --clip    Copy to clipboard\n"
-            "  passcli insert web/github         Add new entry\n"
-            "  passcli otp web/github            TOTP code\n"
-            "  passcli run aws/prod -- aws s3 ls Inject secrets as env vars\n"
-            "  passcli health                    Password health report\n"
-            "  passcli import export.csv         Import from Bitwarden/LastPass\n"
-            "  passcli sync                      Git pull + push\n"
-            "  passcli wizard                    First-time setup\n"
+            "Quick copy (the fast path — no subcommand needed):\n"
+            "  passclip gmail                     Fuzzy match → copy password\n"
+            "  passclip gmail -u                  Copy username\n"
+            "  passclip gmail -o                  Copy OTP code\n"
+            "  passclip gmail -s                  Show full entry\n"
+            "\n"
+            "Full commands:\n"
+            "  passclip                           Start interactive shell\n"
+            "  passclip get email/gmail --clip    Copy to clipboard\n"
+            "  passclip insert web/github         Add new entry\n"
+            "  passclip otp --add web/github      Add OTP to entry\n"
+            "  passclip health                    Password health report\n"
+            "  passclip import export.csv         Import from Bitwarden/LastPass\n"
+            "  passclip sync                      Git pull + push\n"
+            "  passclip wizard                    First-time setup\n"
         ),
     )
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -1939,8 +2295,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("health", help="Password health report")
 
     # otp
-    sp = sub.add_parser("otp", help="Generate TOTP code")
+    sp = sub.add_parser("otp", help="Generate TOTP code or add OTP to an entry")
     sp.add_argument("entry", nargs="?")
+    sp.add_argument("--add", "-a", action="store_true",
+                    help="Add/update OTP secret on an entry")
 
     # run
     sp = sub.add_parser("run", help="Inject entry as env vars and run a command")
@@ -2033,6 +2391,21 @@ def main() -> None:
         _start_shell()
         return
 
+    # ── Smart default: passclip <term> [-u|-o|-s] ──────────────────────────
+    # If the first argument isn't a known subcommand or flag, treat the whole
+    # invocation as a fuzzy search + copy.  This is the fast path for daily
+    # use — type "passclip gmail" and the password is in your clipboard.
+    _known = {
+        "get", "show", "clip", "insert", "add", "generate", "edit",
+        "delete", "browse", "health", "otp", "run", "sync", "gitlog",
+        "import", "find", "ls", "mv", "cp", "archive", "restore",
+        "wizard", "config", "shell", "export-vault", "import-vault",
+    }
+    first = sys.argv[1]
+    if first not in _known and not first.startswith("-"):
+        smart_copy(sys.argv[1:])
+        return
+
     parser = build_parser()
     args = parser.parse_args()
 
@@ -2078,7 +2451,10 @@ def main() -> None:
         cmd_health()
 
     elif args.command == "otp":
-        cmd_otp(args.entry)
+        if getattr(args, "add", False):
+            cmd_otp_add(args.entry)
+        else:
+            cmd_otp(args.entry)
 
     elif args.command == "run":
         remainder = args.cmd
@@ -2111,6 +2487,10 @@ def main() -> None:
         console.print(out if rc == 0 else f"[red]{err}[/red]")
 
     elif args.command == "mv":
+        ok, err_msg = validate_entry_name(args.new)
+        if not ok:
+            _error(err_msg)
+            return
         _, err, rc = run_command(["pass", "mv", args.old, args.new])
         console.print(
             f"[green]Moved '{args.old}' -> '{args.new}'.[/green]" if rc == 0
@@ -2118,6 +2498,10 @@ def main() -> None:
         )
 
     elif args.command == "cp":
+        ok, err_msg = validate_entry_name(args.new)
+        if not ok:
+            _error(err_msg)
+            return
         _, err, rc = run_command(["pass", "cp", args.old, args.new])
         console.print(
             f"[green]Copied '{args.old}' -> '{args.new}'.[/green]" if rc == 0
@@ -2139,6 +2523,10 @@ def main() -> None:
         entry = args.entry or fuzzy_select(display, "Select entry to restore")
         if entry:
             dest = Prompt.ask("Restore to", default=entry)
+            ok, err_msg = validate_entry_name(dest)
+            if not ok:
+                _error(err_msg)
+                return
             _, err, rc = run_command(["pass", "mv", f"archive/{entry}", dest])
             console.print(
                 f"[green]Restored to '{dest}'.[/green]" if rc == 0

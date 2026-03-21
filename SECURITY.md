@@ -4,7 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 1.0.x | Yes |
+| 1.1.x | Yes |
+| 1.0.x | No |
 
 We only support the latest release. If you're running an older version, please update before reporting issues.
 
@@ -12,7 +13,7 @@ We only support the latest release. If you're running an older version, please u
 
 ## Reporting a vulnerability
 
-If you find a security vulnerability in PassCLI, **please report it privately** rather than opening a public issue.
+If you find a security vulnerability in Passclip, **please report it privately** rather than opening a public issue.
 
 **How to report:**
 
@@ -23,7 +24,7 @@ If you find a security vulnerability in PassCLI, **please report it privately** 
 
 - A clear description of the vulnerability
 - Steps to reproduce it
-- The version of PassCLI you're running (`passcli --version`)
+- The version of Passclip you're running (`passclip --version`)
 - Your operating system and Python version
 - Any proof-of-concept code or output, if applicable
 
@@ -39,28 +40,28 @@ Please **do not** open a public GitHub issue for security vulnerabilities. This 
 
 ## Security model
 
-PassCLI is a wrapper around [`pass`](https://www.passwordstore.org/), the standard Unix password manager. It does not implement its own encryption for the password store — that's all handled by GPG through `pass`. Here's what PassCLI is responsible for and what it isn't.
+Passclip is a security-focused CLI interface built on top of [`pass`](https://www.passwordstore.org/), the standard Unix password manager. It does not implement its own encryption for the password store — that's all handled by GPG through `pass`. Here's what Passclip is responsible for and what it isn't.
 
-### What PassCLI handles
+### What Passclip handles
 
 - **Input validation**: entry names are checked for path traversal (`..`), shell metacharacters, excessive depth, and other tricks before any write operation.
 - **Subprocess safety**: all calls to `pass`, `gpg`, `git`, and other tools use Python's `subprocess` module with list arguments. There is no `shell=True` anywhere in the codebase, which means no shell injection.
-- **Clipboard management**: passwords are auto-cleared from the clipboard after a configurable timeout (default 45s). PassCLI checks clipboard content before clearing to avoid wiping something you copied after the password.
+- **Clipboard management**: passwords are auto-cleared from the clipboard after a configurable timeout (default 45s). Passclip checks clipboard content before clearing to avoid wiping something you copied after the password.
 - **Vault encryption**: the `export-vault` / `import-vault` feature uses AES-256-GCM with a key derived via PBKDF2-SHA256 at 600,000 iterations. Vault files are written atomically (temp file + rename) to prevent partial files.
 - **File permissions**: config files, history files, vault exports, and pre-delete backups are all created with `0600` permissions (owner read/write only).
 - **Concurrent access**: the interactive shell uses a PID-based lock file to warn you if another instance is already running.
 
 ### What GPG / pass handles
 
-- **Encryption at rest**: every password entry is encrypted with your GPG key. PassCLI never sees or stores plaintext passwords — it calls `pass` to decrypt on demand.
+- **Encryption at rest**: every password entry is encrypted with your GPG key. Passclip never sees or stores plaintext passwords — it calls `pass` to decrypt on demand.
 - **Key management**: GPG key generation, trust, expiry, and revocation are all managed through GPG directly.
-- **Git integration**: `pass` has built-in git support. PassCLI's `sync` command just calls `git pull` and `git push` inside the store directory.
+- **Git integration**: `pass` has built-in git support. Passclip's `sync` command just calls `git pull` and `git push` inside the store directory.
 
 ### What's outside our control
 
-- **GPG agent security**: if your GPG agent is configured to cache passphrases, decrypted material stays in agent memory for the cache duration. This is a GPG setting, not a PassCLI setting.
+- **GPG agent security**: if your GPG agent is configured to cache passphrases, decrypted material stays in agent memory for the cache duration. This is a GPG setting, not a Passclip setting.
 - **System clipboard**: once a password is on the clipboard, any application on your system can read it until it's cleared. The auto-clear timer helps, but there's a window of exposure.
-- **Terminal scrollback**: if you display a password in the terminal (`passcli get`), it may be visible in your terminal's scrollback buffer. Consider using `--clip` instead.
+- **Terminal scrollback**: if you display a password in the terminal (`passclip get`), it may be visible in your terminal's scrollback buffer. Consider using `--clip` instead.
 - **Memory**: Python doesn't provide guaranteed memory zeroing. Decrypted passwords exist in Python process memory briefly during display or clipboard operations. This is a known limitation of high-level languages.
 
 ---
@@ -77,24 +78,26 @@ Between copying a password to the clipboard and the auto-clear timer firing, any
 
 ### Shell history
 
-The interactive shell stores command history at `~/.config/passcli/history`. This file contains command names and entry paths (like `get email/gmail`) but **not** passwords. It's created with `0600` permissions. If this concerns you, you can disable history by removing the file and making it unwritable:
+The interactive shell stores command history at `~/.config/passclip/history`. This file contains command names and entry paths (like `get email/gmail`) but **not** passwords. It's created with `0600` permissions. If this concerns you, you can disable history by removing the file and making it unwritable:
 
 ```bash
-rm ~/.config/passcli/history
-touch ~/.config/passcli/history
-chmod 000 ~/.config/passcli/history
+rm ~/.config/passclip/history
+touch ~/.config/passclip/history
+chmod 000 ~/.config/passclip/history
 ```
 
 ### The `run` command exposes secrets to child processes
 
-When you run `passcli run entry -- some-command`, the entry's fields are passed as environment variables to the child process. The child process (and any processes it spawns) can read those variables. This is by design — it's how the feature works. The variables are not persisted to disk or shell history.
+When you run `passclip run entry -- some-command`, the entry's fields are passed as environment variables to the child process. The child process (and any processes it spawns) can read those variables. This is by design — it's how the feature works. The variables are not persisted to disk or shell history.
+
+**Note:** On Linux, other processes running as the same user can read environment variables via `/proc/<pid>/environ`. If this is a concern in your threat model, prefer piping secrets through stdin instead of using `run`.
 
 ### Pre-delete backups are plaintext
 
-When you delete an entry, PassCLI saves a plaintext backup to `~/.config/passcli/backups/` (with `0600` permissions). These exist as a safety net so you can recover accidentally deleted entries. If you want to clean them up:
+When you delete an entry, Passclip saves a plaintext backup to `~/.config/passclip/backups/` (with `0600` permissions). These exist as a safety net so you can recover accidentally deleted entries. If you want to clean them up:
 
 ```bash
-rm -rf ~/.config/passcli/backups/
+rm -rf ~/.config/passclip/backups/
 ```
 
 ### Vault passphrase is not recoverable
@@ -105,14 +108,14 @@ Vault files exported with `export-vault` are encrypted with a passphrase you cho
 
 ## Hardening checklist
 
-If you're deploying PassCLI in a security-sensitive environment, here are some things to consider:
+If you're deploying Passclip in a security-sensitive environment, here are some things to consider:
 
 - [ ] Set `clip_timeout` to the shortest duration you can tolerate
 - [ ] Use `--clip` or `--field` instead of displaying passwords in the terminal
 - [ ] Set `GPG_TTY=$(tty)` in your shell profile for reliable pinentry
 - [ ] Store vault backups on an encrypted drive or in a secure location
-- [ ] Periodically run `passcli health` to catch weak or reused passwords
-- [ ] Clean out `~/.config/passcli/backups/` regularly
+- [ ] Periodically run `passclip health` to catch weak or reused passwords
+- [ ] Clean out `~/.config/passclip/backups/` regularly
 - [ ] If using git sync, make sure the remote repository is private
 - [ ] Review GPG key expiry dates and renew before they lapse
 - [ ] Use a strong GPG passphrase — it's the last line of defense
@@ -121,7 +124,7 @@ If you're deploying PassCLI in a security-sensitive environment, here are some t
 
 ## Dependencies
 
-PassCLI's security depends on these external tools and libraries:
+Passclip's security depends on these external tools and libraries:
 
 | Dependency | Role | Version guidance |
 |---|---|---|

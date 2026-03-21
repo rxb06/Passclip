@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "passclip"
+version = "1.1.0"
+description = "Security-focused CLI interface for managing and accessing secrets"
+readme = "README.md"
+license = "GPL-3.0-only"
+requires-python = ">=3.8"
+authors = [
+    { name = "Rutvik" },
+]
+keywords = [
+    "password-manager",
+    "pass",
+    "gpg",
+    "clipboard",
+    "totp",
+    "otp",
+    "security",
+    "cli",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "rich>=13.0",
+    "cryptography>=41.0",
+]
+
+[project.optional-dependencies]
+clipboard = ["pyperclip"]
+otp = ["pyotp"]
+all = ["pyperclip", "pyotp"]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+passclip = "passclip:main"
+
+[project.urls]
+Homepage = "https://github.com/rxb06/Passclip"
+Repository = "https://github.com/rxb06/Passclip"
+Documentation = "https://github.com/rxb06/Passclip/tree/main/docs"
+Issues = "https://github.com/rxb06/Passclip/issues"
+Changelog = "https://github.com/rxb06/Passclip/blob/main/docs/changelog.md"
+
+[tool.setuptools]
+py-modules = ["passclip"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]

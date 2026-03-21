@@ -1,8 +1,27 @@
 # Changelog
 
-All notable changes to PassCLI are documented here.
+All notable changes to Passclip are documented here.
 
 This project follows [Keep a Changelog](https://keepachangelog.com/) conventions.
+
+---
+
+## [1.1.0] — 2026-03-20
+
+UX overhaul — fewer keystrokes for the things you do every day.
+
+### Added
+
+- **Smart fuzzy copy** — `passclip gmail` copies the password. No subcommand, no full path, no flags. Fuzzy matches against all entries. Add `-u` for username, `-o` for OTP, `-s` to show.
+- **Shell shortcuts** — `c gmail`, `u gmail`, `o gmail` in the interactive shell. Single-letter commands that fuzzy-search and copy.
+- **Browse defaults to copy** — pressing Enter on a selected entry copies the password instead of showing the details panel.
+
+### Changed
+
+- Action menu now defaults to **copy** (`c`) instead of show (`s`), with the default highlighted.
+- Help text, wizard, and documentation updated to lead with quick-copy examples.
+- Rebranded from PassCLI to **Passclip**.
+- File renamed from `pass_cli.py` to `passclip.py`.
 
 ---
 
@@ -12,11 +31,14 @@ The production-ready release. Everything has been hardened, documented, and test
 
 ### Added
 
-- **`--version` flag** — `passcli --version` now prints the version.
+- **`otp --add` command** — guided flow to add or update OTP secrets on existing entries. Auto-detects `otpauth://` URIs and base32 secrets from the clipboard. Validates before saving and shows the first code as confirmation.
+- **OTP prompt in `insert`** — optional OTP secret field during entry creation (when `pyotp` is installed).
+- **Clipboard reading** — `_read_clipboard()` helper for reading clipboard content (used by `otp --add`).
+- **`--version` flag** — `passclip --version` now prints the version.
 - **Entry name validation** — blocks path traversal (`..`), shell metacharacters, leading `-` or `/`, and excessively deep paths. Applied to `insert`, `generate`, `import`, and all shell commands.
 - **`--dry-run` for import** — preview what a CSV import would create without actually writing anything.
-- **Pre-delete backups** — entries are saved to `~/.config/passcli/backups/` (with `0600` permissions) before deletion. Safety net for accidental deletes.
-- **Concurrent access warning** — the interactive shell creates a PID-based lock file (`.passcli.lock`) and warns if another instance is already running.
+- **Pre-delete backups** — entries are saved to `~/.config/passclip/backups/` (with `0600` permissions) before deletion. Safety net for accidental deletes.
+- **Concurrent access warning** — the interactive shell creates a PID-based lock file (`.passclip.lock`) and warns if another instance is already running.
 - **Atomic vault exports** — vault files are written to a temp file first, then renamed into place. No partial files if the disk fills up or the process is killed.
 - **Vault import error clarity** — wrong passphrase and corrupted file are now reported as distinct errors instead of a generic "decryption failed".
 - **`pass_dir` config validation** — warns if the directory doesn't exist before saving it.
@@ -24,7 +46,7 @@ The production-ready release. Everything has been hardened, documented, and test
 - **Health scan progress** — shows which entry is currently being scanned.
 - **Shell completions** — bash, zsh, and fish completion scripts in `completions/`.
 - **`_error()` helper** — consistent error formatting across the codebase.
-- **Documentation** — `docs/QUICK_START.md`, `docs/SETUP.md`, `docs/USE_CASES.md`, `SECURITY.md`, `DISCLAIMER.md`, `CONTRIBUTING.md`.
+- **Documentation** — `docs/setup.md`, `docs/user-guide.md`, `docs/examples.md`, `docs/integration.md`, `SECURITY.md`, `DISCLAIMER.md`, `CONTRIBUTING.md`.
 
 ### Changed
 
@@ -58,7 +80,7 @@ The production-ready release. Everything has been hardened, documented, and test
 
 ### Added
 
-- Basic `pass` wrapper with `get`, `insert`, `generate`, `edit`, `delete`, `ls`, `find`.
+- CLI interface for `pass` with `get`, `insert`, `generate`, `edit`, `delete`, `ls`, `find`.
 - Interactive shell with command history.
 - CSV import (Bitwarden, LastPass, 1Password).
 - TOTP code generation.
@@ -68,4 +90,4 @@ The production-ready release. Everything has been hardened, documented, and test
 - `archive` / `restore` for soft-deleting entries.
 - `browse` with fzf integration.
 - Setup wizard.
-- Configuration system (`~/.config/passcli/config.json`).
+- Configuration system (`~/.config/passclip/config.json`).

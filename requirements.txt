@@ -1,4 +1,4 @@
-# PassCLI dependencies
+# Passclip dependencies
 
 # Required
 rich>=13.0

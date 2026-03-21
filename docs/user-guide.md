@@ -1,6 +1,6 @@
-# PassCLI Guide
+# Passclip Guide
 
-A complete walkthrough of what PassCLI does, who it's for, and how to get the most out of it. If you're looking for installation instructions, see [SETUP.md](SETUP.md). If you're looking for the security model, see [../SECURITY.md](../SECURITY.md).
+A complete walkthrough of what Passclip does, who it's for, and how to get the most out of it. If you're looking for installation instructions, see [setup.md](setup.md). If you're looking for the security model, see [../SECURITY.md](../SECURITY.md).
 
 ---
 
@@ -22,21 +22,21 @@ A complete walkthrough of what PassCLI does, who it's for, and how to get the mo
 
 ## Who is this for?
 
-### The normal user
+### The engineer
 
-You want a secure password manager that doesn't send your passwords to a server somewhere. You've heard `pass` is the gold standard for Unix password management but the command line looks intimidating. PassCLI's `wizard` sets everything up for you, and after that `browse` is all you need day to day.
+You manage secrets across services, infrastructure, and CI/CD pipelines. You need credentials injected into builds without `.env` files on disk. You want structured entries you can query programmatically. The `run` command, structured `key: value` format, and fuzzy-copy shortcuts are built for this workflow.
 
-### The developer
+### The security-conscious practitioner
 
-You use secrets constantly — API keys, database credentials, environment variables. You're tired of `.env` files that accidentally get committed. You want to inject secrets into your development environment without them ever touching disk unencrypted. The `run` command and the structured entry format are built for you.
+Your threat model says secrets should never leave your machine unencrypted. You don't trust cloud password managers — not because they're insecure, but because local GPG-encrypted storage with git-based sync is the architecture you want. `pass` provides the foundation. Passclip makes it practical with health auditing, clipboard auto-clear, and entry validation.
 
 ### The power user migrating from another manager
 
 You have a Bitwarden or LastPass export and want to move to a local, offline, GPG-encrypted store. The `import` command handles this in one step with format auto-detection.
 
-### The security-conscious person
+### Anyone who uses `pass` daily
 
-You don't trust cloud password managers — not because they're insecure, but because your threat model says your secrets should never leave your machine unencrypted. `pass` with a git backup is the right architecture. PassCLI makes it practical.
+You like `pass` but the ergonomics slow you down. You want one command to grab a password, tab completion in a REPL, TOTP codes without a separate extension, and a health report that flags weak or reused credentials. Passclip's `wizard` sets everything up, and `passclip gmail` is all you need day to day.
 
 ---
 
@@ -44,7 +44,7 @@ You don't trust cloud password managers — not because they're insecure, but be
 
 ### The structured entry format
 
-Raw `pass` stores free-form text. The first line is conventionally the password, but the rest is up to you. PassCLI formalizes this with a consistent structure:
+Raw `pass` stores free-form text. The first line is conventionally the password, but the rest is up to you. Passclip formalizes this with a consistent structure:
 
 ```
 MyActualPassword123!
@@ -61,7 +61,7 @@ otp: JBSWY3DPEHPK3PXP
 - Any line that isn't a `key: value` pair is treated as notes.
 - This format is fully compatible with raw `pass` — the file is plain text before GPG encryption.
 
-You don't have to use this format. If you use `pass insert` directly or edit entries with `pass edit`, the content is whatever you typed. PassCLI will still work — it reads whatever is there, and the first line is always the password.
+You don't have to use this format. If you use `pass insert` directly or edit entries with `pass edit`, the content is whatever you typed. Passclip will still work — it reads whatever is there, and the first line is always the password.
 
 ### Entry paths
 
@@ -77,7 +77,7 @@ dev/stripe-test
 ssh/personal-server
 ```
 
-PassCLI stores these as `~/.password-store/email/gmail.gpg`, etc. The `.gpg` extension is handled by `pass` transparently — you never type it.
+Passclip stores these as `~/.password-store/email/gmail.gpg`, etc. The `.gpg` extension is handled by `pass` transparently — you never type it.
 
 ### The password store
 
@@ -91,38 +91,53 @@ Everything lives in `~/.password-store/`. This directory is:
 
 ## Two ways to use it
 
-### Direct CLI mode
+### Quick copy mode (the fast path)
 
-Run a single command and exit. Best for scripts, quick lookups, and keyboard shortcuts.
+For the thing you do 10 times a day — grabbing a password. Just type the name:
 
 ```bash
-passcli get email/gmail
-passcli get email/gmail --clip
-passcli insert web/github
-passcli health
-passcli sync
+passclip gmail                    # copies password to clipboard
+passclip gmail -u                 # copies username
+passclip gmail -o                 # copies OTP code
+passclip gmail -s                 # shows the full entry
 ```
 
-All commands work this way. Run `passcli --help` to see every subcommand.
+You don't need to know the exact path. `passclip gmail` matches `email/gmail`, `web/gmail`, or anything with "gmail" in the name. If there's one match, it copies instantly. If there are several, you pick from a list.
+
+This works because Passclip treats any argument that isn't a known subcommand as a search term. No `get`, no `--clip`, no flags to remember.
+
+### Direct CLI mode
+
+For when you need the full command, scripting, or specific flags:
+
+```bash
+passclip get email/gmail --clip --field password
+passclip insert web/github
+passclip health
+passclip sync
+```
+
+Run `passclip --help` to see every subcommand.
 
 ### Interactive shell mode
 
-Run `passcli` (no arguments) to enter the persistent shell. Best for interactive sessions where you need to do several things.
+Run `passclip` (no arguments) to enter the persistent shell. Best for interactive sessions where you need to do several things.
 
 ```
-passcli> browse
-passcli> get email/gmail
-passcli> otp web/github
-passcli> health
-passcli> sync
+passclip> c gmail           # copy password (fuzzy)
+passclip> u gmail           # copy username (fuzzy)
+passclip> o gmail           # copy OTP code (fuzzy)
+passclip> browse            # fuzzy pick → action menu
+passclip> health
+passclip> sync
 ```
 
 **Shell advantages over direct CLI:**
+- **Single-letter shortcuts**: `c`, `u`, `o` — fuzzy search + copy in one command
 - Tab completion for entry names — type `get em` and press Tab
 - Persistent command history across sessions
 - Faster for multiple operations — no subprocess startup overhead
-- Quick-copy after viewing — press `c`/`u`/`l` to copy password, username, or URL without re-running the command
-- `browse` is most natural here — fuzzy-pick, act, pick again
+- `browse` defaults to copy — press Enter on an entry and the password is in your clipboard
 
 ---
 
@@ -131,7 +146,7 @@ passcli> sync
 ### browse — the daily driver
 
 ```bash
-passcli browse
+passclip browse
 ```
 
 Opens fzf (or a filtered numbered list if fzf isn't installed) with every entry in your store. You fuzzy-search, select, and then choose what to do:
@@ -149,16 +164,16 @@ Opens fzf (or a filtered numbered list if fzf isn't installed) with every entry 
 
 This is the command most people use most often. You don't need to remember paths. You type a few characters of what you're looking for, press Enter, and either the password is shown or it's in your clipboard.
 
-**Without fzf:** If fzf isn't installed and you have more than 15 entries, PassCLI asks for a filter term first, then shows a numbered list of matches. Large vaults stay navigable even without fzf.
+**Without fzf:** If fzf isn't installed and you have more than 15 entries, Passclip asks for a filter term first, then shows a numbered list of matches. Large vaults stay navigable even without fzf.
 
 ---
 
 ### get — retrieve with precision
 
 ```bash
-passcli get email/gmail             # show full entry
-passcli get email/gmail --clip      # copy password to clipboard
-passcli get email/gmail --field url # print just the URL
+passclip get email/gmail             # show full entry
+passclip get email/gmail --clip      # copy password to clipboard
+passclip get email/gmail --field url # print just the URL
 ```
 
 When you retrieve without `--clip`, the full structured entry is displayed in a panel with a password strength indicator:
@@ -185,10 +200,10 @@ Press `c` to copy the password, `u` to copy the username, or `l` to copy the URL
 
 ```bash
 # Get just the username for a login form
-passcli get web/github --field username
+passclip get web/github --field username
 
 # Copy just the URL to clipboard
-passcli get web/github --field url --clip
+passclip get web/github --field url --clip
 ```
 
 ---
@@ -196,7 +211,7 @@ passcli get web/github --field url --clip
 ### insert — add entries the right way
 
 ```bash
-passcli insert web/github
+passclip insert web/github
 ```
 
 Prompts you through each field:
@@ -208,9 +223,10 @@ Username: john@example.com
 Email:
 URL: https://github.com
 Notes: personal account
+OTP secret (Enter to skip):
 ```
 
-**Auto-generate option:** Leave the password blank and press Enter. PassCLI asks for a length and whether to include symbols, then generates a secure random password.
+**Auto-generate option:** Leave the password blank and press Enter. Passclip asks for a length and whether to include symbols, then generates a secure random password.
 
 ```
 Password (Enter to generate): ↵
@@ -227,16 +243,16 @@ Password strength is always shown immediately so you can decide whether it's str
 ### generate — create strong passwords
 
 ```bash
-passcli generate web/newsite          # 20 chars, default settings
-passcli generate web/newsite 32       # 32 chars
-passcli generate web/newsite --no-symbols  # alphanumeric only
-passcli generate web/newsite --clip   # generate and copy to clipboard
+passclip generate web/newsite          # 20 chars, default settings
+passclip generate web/newsite 32       # 32 chars
+passclip generate web/newsite --no-symbols  # alphanumeric only
+passclip generate web/newsite --clip   # generate and copy to clipboard
 ```
 
 Default length is configurable:
 
 ```bash
-passcli config default_password_length 32
+passclip config default_password_length 32
 ```
 
 **When to use `--no-symbols`:** Some banking sites and legacy enterprise tools reject passwords with special characters.
@@ -246,7 +262,7 @@ passcli config default_password_length 32
 ### health — know the state of your vault
 
 ```bash
-passcli health
+passclip health
 ```
 
 Decrypts every entry and analyzes:
@@ -263,41 +279,43 @@ Both weak and fair passwords are shown in detail so you can prioritize what to f
 1. Start with duplicates — reused passwords are the highest risk
 2. Work through weak passwords from shortest to longest
 3. Upgrade fair passwords when you have time
-4. Use `passcli generate <entry>` to replace them
+4. Use `passclip generate <entry>` to replace them
 
 ---
 
 ### otp — TOTP codes without a phone
 
+**Adding OTP to an entry:**
+
 ```bash
-passcli otp web/github
+passclip otp --add web/github
 ```
 
-Generates a live TOTP code and copies it to clipboard (auto-clears when it expires).
+This walks you through it:
+1. If you copied an `otpauth://` URI or base32 secret to your clipboard, it detects it and offers to use it
+2. Otherwise, paste the secret when prompted
+3. It validates the secret, saves it to the entry, and shows your first code as confirmation
 
-**Setup:** Add your OTP secret to any entry as a field named `otp`:
+You can also set up OTP during `passclip insert` — there's an optional OTP secret prompt after the other fields.
 
-```
-MyPassword123
-username: john
-url: https://github.com
-otp: JBSWY3DPEHPK3PXP
-```
+**Generating a code:**
 
-Or use a full `otpauth://` URI (as exported by most authenticator apps):
-
-```
-otp: otpauth://totp/GitHub:john@example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub
+```bash
+passclip otp web/github
 ```
 
-**Where to get the OTP secret:** When setting up 2FA on a site, most show a QR code AND a text secret underneath. Copy the text secret.
+Shows a live TOTP code and copies it to clipboard (auto-clears when it expires).
+
+**Where to get the OTP secret:** When setting up 2FA on a site, most show a QR code AND a text secret underneath. Copy the text secret to your clipboard, then run `passclip otp --add`.
+
+Passclip accepts both raw base32 secrets (like `JBSWY3DPEHPK3PXP`) and full `otpauth://` URIs.
 
 ---
 
 ### run — inject secrets as environment variables
 
 ```bash
-passcli run <entry> -- <command>
+passclip run <entry> -- <command>
 ```
 
 Decrypts the entry, maps every field to an environment variable (`PASS_<FIELDNAME_UPPERCASE>`), and runs your command with those variables injected. The secret never touches your shell history or any file on disk.
@@ -324,7 +342,7 @@ stripe.api_key = os.environ["PASS_PASSWORD"]
 
 **Why this is better than a `.env` file:**
 
-| `.env` file approach | `passcli run` approach |
+| `.env` file approach | `passclip run` approach |
 |---|---|
 | Secret is on disk unencrypted | Secret never touches disk |
 | Risk of accidentally committing it | Nothing to commit |
@@ -336,8 +354,8 @@ stripe.api_key = os.environ["PASS_PASSWORD"]
 ### export-vault / import-vault — encrypted backup
 
 ```bash
-passcli export-vault ~/backup.passvault
-passcli import-vault ~/backup.passvault
+passclip export-vault ~/backup.passvault
+passclip import-vault ~/backup.passvault
 ```
 
 Your password store is already encrypted per-entry by GPG. But it's spread across many `.gpg` files. If you want to transfer the store to a new machine, make a point-in-time backup, or hand off a copy to someone temporarily, you'd normally need to tar and GPG-encrypt the whole directory yourself. `export-vault` does this in one step.
@@ -369,7 +387,7 @@ The `--force` flag on `import-vault` skips the overwrite confirmation prompt. Us
 ### find — search and act
 
 ```bash
-passcli find gmail
+passclip find gmail
 ```
 
 Searches entry names for the term and displays matching results. Then offers to select one and act on it — the same action menu as `browse`.
@@ -382,18 +400,23 @@ Turns `find` from a read-only search into a complete workflow — search, select
 
 ### Logging in to something
 
-1. Run `passcli browse` (or enter the shell and type `browse`)
-2. Type a few characters of the site name — fzf filters instantly
-3. Press Enter on the right entry
-4. Press `c` to copy the password
-5. Switch to your browser, paste
+```bash
+passclip gmail          # password → clipboard
+```
 
-Three keystrokes and a paste.
+That's it. One command, one paste.
+
+If you're already in the shell: `c gmail`. Same result.
+
+Need the username too?
+```bash
+passclip gmail -u       # username → clipboard
+```
 
 ### Signing up for a new service
 
 ```bash
-passcli insert web/newsite
+passclip insert web/newsite
 # Password (Enter to generate): ↵     ← auto-generates
 # Length [20]:
 # Username: john@example.com
@@ -405,16 +428,22 @@ Creates the entry with username, URL, and a generated password in one step.
 ### Logging in with 2FA
 
 ```bash
-passcli get web/github --clip    # password copied
-passcli otp web/github           # OTP code copied
+passclip github                   # password → clipboard, paste it
+passclip github -o                # OTP code → clipboard, paste it
 ```
 
-Or in the shell, use `browse`, copy the password with `c`, then run `otp web/github`.
+Or in the shell:
+```
+passclip> c github
+passclip> o github
+```
+
+**First time?** Set up OTP with `passclip otp --add web/github` — copy the secret from the site, and Passclip picks it up from your clipboard.
 
 ### Updating a password after a breach
 
 ```bash
-passcli generate web/breached-service 32
+passclip generate web/breached-service 32
 ```
 
 Generates a new password and replaces the old one. Strength is shown immediately.
@@ -428,20 +457,20 @@ Generates a new password and replaces the old one. Strength is shown immediately
 Store your project's secrets:
 
 ```bash
-passcli insert myapp/database
+passclip insert myapp/database
 # password: postgres://user:pass@localhost/mydb
 
-passcli insert myapp/stripe
+passclip insert myapp/stripe
 # password: sk_live_abc123
 
-passcli insert myapp/sendgrid
+passclip insert myapp/sendgrid
 # password: SG.abc123
 ```
 
 Run your app with secrets injected:
 
 ```bash
-passcli run myapp/database -- python manage.py runserver
+passclip run myapp/database -- python manage.py runserver
 ```
 
 ### API key management
@@ -467,12 +496,12 @@ The `notes` field is where you record rotation schedules, what the key has acces
 
 Retrieve for scripts:
 ```bash
-OPENAI_KEY=$(passcli get api/openai --field password)
+OPENAI_KEY=$(passclip get api/openai --field password)
 ```
 
 Or inject directly:
 ```bash
-passcli run api/openai -- python scripts/summarize.py input.txt
+passclip run api/openai -- python scripts/summarize.py input.txt
 ```
 
 ### Database credentials per environment
@@ -485,37 +514,37 @@ db/myapp-prod
 
 Use shell aliases:
 ```bash
-alias db-staging='passcli run db/myapp-staging -- python manage.py dbshell'
-alias db-prod='passcli run db/myapp-prod -- python manage.py dbshell'
+alias db-staging='passclip run db/myapp-staging -- python manage.py dbshell'
+alias db-prod='passclip run db/myapp-prod -- python manage.py dbshell'
 ```
 
 ### SSH and server credentials
 
 ```bash
-passcli insert ssh/prod-server
+passclip insert ssh/prod-server
 # password: your_ssh_passphrase
 # username: deploy
 # url: 192.168.1.100
 # notes: Ubuntu 22.04, port 2222
 
 # Retrieve and connect
-SERVER=$(passcli get ssh/prod-server --field url)
-USER=$(passcli get ssh/prod-server --field username)
+SERVER=$(passclip get ssh/prod-server --field url)
+USER=$(passclip get ssh/prod-server --field username)
 ssh "$USER@$SERVER"
 ```
 
 ### CI/CD pipelines
 
-For GitHub Actions or similar, you can't use PassCLI directly (CI machines don't have your GPG key). The pattern is:
+For GitHub Actions or similar, you can't use Passclip directly (CI machines don't have your GPG key). The pattern is:
 
-1. Store CI secrets in PassCLI locally as your source of truth
-2. When you rotate a secret, update it in PassCLI first, then push to GitHub Secrets
+1. Store CI secrets in Passclip locally as your source of truth
+2. When you rotate a secret, update it in Passclip first, then push to GitHub Secrets
 3. Retrieve the current value to copy-paste:
    ```bash
-   passcli get ci/github-deploy --clip
+   passclip get ci/github-deploy --clip
    ```
 
-PassCLI is your local source of truth. CI systems have their own secret stores — PassCLI feeds them.
+Passclip is your local source of truth. CI systems have their own secret stores — Passclip feeds them.
 
 ---
 
@@ -525,7 +554,7 @@ PassCLI is your local source of truth. CI systems have their own secret stores �
 
 ```bash
 pip install rich cryptography pyperclip pyotp
-python pass_cli.py wizard
+passclip wizard
 ```
 
 The wizard generates a GPG key, initializes the store, and sets up git. Done.
@@ -537,7 +566,7 @@ The wizard generates a GPG key, initializes the store, and sets up git. Done.
 ```bash
 git clone git@github.com:you/your-pass-store.git ~/.password-store
 pip install rich cryptography pyperclip pyotp
-passcli ls    # verify it works
+passclip ls    # verify it works
 ```
 
 You'll need the same GPG key. Export it from your old machine:
@@ -556,8 +585,8 @@ rm private.key
 
 ```bash
 pip install rich cryptography pyperclip pyotp
-python pass_cli.py wizard               # set up GPG and empty store
-passcli import-vault ~/backup.vault     # restore everything
+passclip wizard               # set up GPG and empty store
+passclip import-vault ~/backup.vault     # restore everything
 ```
 
 ---
@@ -575,27 +604,27 @@ Good times to export a vault:
 ### Creating a backup
 
 ```bash
-passcli export-vault ~/backup.vault
+passclip export-vault ~/backup.vault
 ```
 
 Pick a strong passphrase. There's no recovery if you forget it.
 
 For dated backups:
 ```bash
-passcli export-vault ~/Dropbox/passcli-backup-$(date +%Y%m).vault
+passclip export-vault ~/Dropbox/passclip-backup-$(date +%Y%m).vault
 ```
 
 ### Restoring from a backup
 
 ```bash
-passcli import-vault ~/backup.vault
+passclip import-vault ~/backup.vault
 ```
 
 If entries already exist, you'll be warned before overwriting. Use `--force` to skip the prompt.
 
 ### Automatic pre-delete backups
 
-PassCLI saves entries to `~/.config/passcli/backups/` before deleting them. If you accidentally delete something, check there first. Clean out the directory periodically — those backups are plaintext.
+Passclip saves entries to `~/.config/passclip/backups/` before deleting them. If you accidentally delete something, check there first. Clean out the directory periodically — those backups are plaintext.
 
 ---
 
@@ -603,17 +632,22 @@ PassCLI saves entries to `~/.config/passcli/backups/` before deleting them. If y
 
 ### Adding a TOTP secret
 
-When a website gives you a TOTP setup QR code, it usually also offers a text secret. Add it to your entry:
+When a website gives you a TOTP setup QR code, it usually also offers a text secret. Copy it, then:
 
 ```bash
-passcli edit web/github
-# Add a line: otp: JBSWY3DPEHPK3PXP
+passclip otp --add web/github
 ```
+
+If the secret is in your clipboard, Passclip detects it and offers to use it automatically. Otherwise, paste it when prompted. Both raw base32 secrets and `otpauth://` URIs work.
+
+You can also add OTP during initial entry creation — `passclip insert` includes an optional OTP secret prompt.
+
+To update an existing OTP secret, run `otp --add` again — it asks before overwriting.
 
 ### Generating a code
 
 ```bash
-passcli otp web/github
+passclip otp web/github
 ```
 
 6-digit code, auto-copied to clipboard, auto-cleared when it expires.
@@ -675,13 +709,13 @@ misc/
 When an entry is no longer active but you don't want to delete it:
 
 ```bash
-passcli archive web/old-employer-vpn
+passclip archive web/old-employer-vpn
 ```
 
 This moves it to `archive/web/old-employer-vpn`. Restore it any time:
 
 ```bash
-passcli restore web/old-employer-vpn
+passclip restore web/old-employer-vpn
 ```
 
 Good candidates for archiving:
@@ -693,9 +727,9 @@ Good candidates for archiving:
 ### Moving and renaming
 
 ```bash
-passcli mv web/twitter web/x          # rename
-passcli mv personal/github dev/github # move to different folder
-passcli cp dev/postgres dev/postgres-backup  # copy
+passclip mv web/twitter web/x          # rename
+passclip mv personal/github dev/github # move to different folder
+passclip cp dev/postgres dev/postgres-backup  # copy
 ```
 
 ---
@@ -704,7 +738,7 @@ passcli cp dev/postgres dev/postgres-backup  # copy
 
 ### Password hygiene
 
-**Generate, never invent.** Use `passcli generate` for every new password. Human-invented passwords are predictable even when they feel random.
+**Generate, never invent.** Use `passclip generate` for every new password. Human-invented passwords are predictable even when they feel random.
 
 **Minimum lengths:**
 - Banking, email, master passwords: 32+ characters
@@ -713,13 +747,13 @@ passcli cp dev/postgres dev/postgres-backup  # copy
 
 **Run health checks regularly.** Once a month:
 ```bash
-passcli health
+passclip health
 ```
 Address everything weak before everything fair.
 
 **Rotate after any breach.** If a service announces a data breach:
 ```bash
-passcli generate web/breached-service 32
+passclip generate web/breached-service 32
 ```
 
 ### GPG key management
@@ -736,12 +770,12 @@ gpg --export-secret-keys --armor YOUR_KEY_ID > private-key-backup.asc
 
 **Take vault backups before GPG key rotation:**
 ```bash
-passcli export-vault ~/vault-pre-rotation-$(date +%Y%m%d).vault
+passclip export-vault ~/vault-pre-rotation-$(date +%Y%m%d).vault
 ```
 
 ### Git and sync
 
-**Commit often, sync regularly.** Every time you add or change an entry, `pass` commits automatically. Run `passcli sync` to push.
+**Commit often, sync regularly.** Every time you add or change an entry, `pass` commits automatically. Run `passclip sync` to push.
 
 **Use a private repository.** Never push your password store to a public repo. Entry names, folder structure, and your GPG key ID are visible in the clear.
 
@@ -751,10 +785,10 @@ passcli export-vault ~/vault-pre-rotation-$(date +%Y%m%d).vault
 
 **Never commit secrets to code.** Not even test secrets. Use `run` instead of `.env` files.
 
-**Rotate API keys regularly.** Update PassCLI first, then update CI/CD variables.
+**Rotate API keys regularly.** Update Passclip first, then update CI/CD variables.
 
 **Use separate entries for production and staging.** `stripe-live` and `stripe-test` should be different entries. Prevents accidental use of production credentials in development.
 
 ---
 
-*PassCLI is a wrapper. `pass` and GPG are doing the real work. If you ever need to step outside PassCLI — for scripting, for a feature not yet built, or for troubleshooting — raw `pass` commands work exactly as documented at [passwordstore.org](https://www.passwordstore.org/). Nothing is locked in.*
+*Passclip extends `pass` — it doesn't replace it. `pass` and GPG are doing the encryption. If you ever need to step outside Passclip — for scripting, for a feature not yet built, or for troubleshooting — raw `pass` commands work exactly as documented at [passwordstore.org](https://www.passwordstore.org/). Nothing is locked in.*

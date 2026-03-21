@@ -1,6 +1,6 @@
 # Setup Guide
 
-Everything you need to get PassCLI installed, configured, and feeling like home. If you're in a hurry, the [quick start](#quick-start) gets you going in under 5 minutes. The rest of this guide covers the details.
+Everything you need to get Passclip installed, configured, and feeling like home. If you're in a hurry, the [quick start](#quick-start) gets you going in under 5 minutes. The rest of this guide covers the details.
 
 ---
 
@@ -10,7 +10,7 @@ Everything you need to get PassCLI installed, configured, and feeling like home.
 - [System requirements](#system-requirements)
 - [GPG key setup](#gpg-key-setup)
 - [Initializing the password store](#initializing-the-password-store)
-- [Installing PassCLI](#installing-passcli)
+- [Installing Passclip](#installing-passclip)
 - [Making it a global command](#making-it-a-global-command)
 - [Shell completions](#shell-completions)
 - [Configuration](#configuration)
@@ -25,22 +25,18 @@ Everything you need to get PassCLI installed, configured, and feeling like home.
 Already have `pass` and GPG? Here's the fast track:
 
 ```bash
-# Install Python deps
-pip install rich cryptography pyperclip pyotp
+# Install from PyPI
+pip install passclip[all]
 
 # Run the setup wizard (handles GPG key + store init)
-python pass_cli.py wizard
-
-# Make it a global command
-chmod +x pass_cli.py
-mkdir -p ~/.local/bin
-ln -sf "$(pwd)/pass_cli.py" ~/.local/bin/passcli
+passclip wizard
 
 # Start using it
-passcli insert email/gmail       # add your first entry
-passcli get email/gmail --clip   # copy to clipboard
-passcli browse                   # fuzzy search everything
-passcli                          # interactive shell
+passclip insert email/gmail       # add your first entry
+passclip gmail                    # copy password to clipboard (fuzzy)
+passclip gmail -u                 # copy username
+passclip gmail -o                 # copy OTP
+passclip                          # interactive shell
 ```
 
 Don't have `pass` or GPG yet? Keep reading — the next sections walk you through everything.
@@ -88,10 +84,18 @@ sudo pacman -S fzf xclip
 
 ### Python dependencies
 
-PassCLI needs Python 3.8 or later. Install the Python packages:
+Passclip needs Python 3.8 or later. Install via pip:
 
 ```bash
-pip install rich cryptography pyperclip pyotp
+pip install passclip[all]
+```
+
+Or install individual extras:
+
+```bash
+pip install passclip              # core (rich + cryptography)
+pip install passclip[clipboard]   # + pyperclip
+pip install passclip[otp]         # + pyotp
 ```
 
 | Package | Required? | What it does |
@@ -101,7 +105,7 @@ pip install rich cryptography pyperclip pyotp
 | `pyperclip` | Recommended | Clipboard copy with auto-clear |
 | `pyotp` | Optional | TOTP / OTP code generation |
 
-If you don't install `pyperclip`, everything still works — you just won't be able to copy to clipboard. If you don't install `pyotp`, the `otp` command won't be available.
+If you don't install `pyperclip`, everything still works — you just won't be able to copy to clipboard. If you don't install `pyotp`, the `otp` command (both generating codes and adding secrets) won't be available, and the OTP prompt during `insert` will be skipped.
 
 ---
 
@@ -116,8 +120,8 @@ gpg --list-secret-keys
 If that shows a key, you're good. If not, generate one:
 
 ```bash
-# Through PassCLI (easiest)
-python pass_cli.py gpg_gen
+# Through Passclip (easiest)
+passclip gpg_gen
 
 # Or manually
 gpg --full-generate-key
@@ -148,52 +152,41 @@ Add that line to your `~/.zshrc` or `~/.bashrc` so it's always set.
 If this is a fresh setup:
 
 ```bash
-# Through PassCLI (recommended — handles everything)
-python pass_cli.py wizard
+# Through Passclip (recommended — handles everything)
+passclip wizard
 
 # Or manually
 pass init YOUR_GPG_KEY_ID
 ```
 
-The wizard does the same thing but also sets up your PassCLI config file and optionally initializes git for syncing.
+The wizard does the same thing but also sets up your Passclip config file and optionally initializes git for syncing.
 
 Your password store lives at `~/.password-store/` by default. Every entry is a GPG-encrypted file inside that directory.
 
 ---
 
-## Installing PassCLI
+## Installing Passclip
 
-Clone or download the repo, then run it directly:
+The recommended way is via pip:
 
 ```bash
-python pass_cli.py
+pip install passclip[all]
 ```
 
-That's it. No build step, no compilation.
-
----
-
-## Making it a global command
-
-So you can type `passcli` from anywhere instead of `python /some/long/path/pass_cli.py`:
+This installs the `passclip` command globally. Verify:
 
 ```bash
-chmod +x pass_cli.py
-mkdir -p ~/.local/bin
-ln -sf "$(pwd)/pass_cli.py" ~/.local/bin/passcli
+passclip --version
 ```
 
-Then make sure `~/.local/bin` is on your PATH. Add this to your shell profile if it isn't:
+### Install from source
+
+If you prefer to install from the repo directly:
 
 ```bash
-# ~/.zshrc or ~/.bashrc
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Restart your shell (or `source ~/.zshrc`) and verify:
-
-```bash
-passcli --version
+git clone https://github.com/rxb06/Passclip.git
+cd Passclip
+pip install -e ".[all]"
 ```
 
 ---
@@ -207,7 +200,7 @@ Tab completion makes a huge difference when you have dozens of entries. We ship 
 Add to your `~/.bashrc`:
 
 ```bash
-source /path/to/passcli/completions/passcli.bash
+source /path/to/passclip/completions/passclip.bash
 ```
 
 ### Zsh
@@ -216,7 +209,7 @@ Copy the completion file into your fpath:
 
 ```bash
 mkdir -p ~/.zfunc
-cp completions/passcli.zsh ~/.zfunc/_passcli
+cp completions/passclip.zsh ~/.zfunc/_passclip
 ```
 
 Then make sure your `~/.zshrc` has:
@@ -229,7 +222,7 @@ autoload -Uz compinit && compinit
 ### Fish
 
 ```bash
-cp completions/passcli.fish ~/.config/fish/completions/
+cp completions/passclip.fish ~/.config/fish/completions/
 ```
 
 After setting up completions, you can tab-complete subcommands, entry names, config keys, and flags.
@@ -238,15 +231,15 @@ After setting up completions, you can tab-complete subcommands, entry names, con
 
 ## Configuration
 
-PassCLI stores its config at `~/.config/passcli/config.json`. You can view and change settings from the command line:
+Passclip stores its config at `~/.config/passclip/config.json`. You can view and change settings from the command line:
 
 ```bash
 # See all current settings
-passcli config
+passclip config
 
 # Change a setting
-passcli config clip_timeout 60
-passcli config default_password_length 24
+passclip config clip_timeout 60
+passclip config default_password_length 24
 ```
 
 ### Available settings
@@ -255,7 +248,7 @@ passcli config default_password_length 24
 |---|---|---|
 | `clip_timeout` | `45` | Seconds before clipboard is auto-cleared |
 | `default_password_length` | `20` | Default length for generated passwords |
-| `default_mode` | `shell` | What happens when you run `passcli` with no args (`shell` or `ls`) |
+| `default_mode` | `shell` | What happens when you run `passclip` with no args (`shell` or `ls`) |
 | `pass_dir` | `~/.password-store` | Path to your password store |
 
 ### Changing the password store location
@@ -263,7 +256,7 @@ passcli config default_password_length 24
 If your store isn't in the default location:
 
 ```bash
-passcli config pass_dir /path/to/your/store
+passclip config pass_dir /path/to/your/store
 ```
 
 Or set the environment variable (this is what `pass` itself uses too):
@@ -279,7 +272,7 @@ export PASSWORD_STORE_DIR=/path/to/your/store
 `pass` has built-in git support. If you initialized your store with git (the wizard offers this), you can push and pull with:
 
 ```bash
-passcli sync
+passclip sync
 ```
 
 This does a `git pull --rebase` followed by `git push` inside your password store directory.
@@ -294,20 +287,20 @@ git remote add origin git@github.com:you/your-pass-store.git
 git push -u origin main
 ```
 
-After that, `passcli sync` handles everything.
+After that, `passclip sync` handles everything.
 
 ### Viewing git history
 
 ```bash
-passcli gitlog       # last 10 commits
-passcli gitlog 25    # last 25 commits
+passclip gitlog       # last 10 commits
+passclip gitlog 25    # last 25 commits
 ```
 
 ---
 
 ## Migrating from another password manager
 
-PassCLI can import CSV exports from Bitwarden, LastPass, and 1Password.
+Passclip can import CSV exports from Bitwarden, LastPass, and 1Password.
 
 ### Step 1: Export from your current manager
 
@@ -320,7 +313,7 @@ PassCLI can import CSV exports from Bitwarden, LastPass, and 1Password.
 Always preview first to make sure things look right:
 
 ```bash
-passcli import your_export.csv --dry-run
+passclip import your_export.csv --dry-run
 ```
 
 This shows exactly what would be created without actually writing anything.
@@ -328,15 +321,15 @@ This shows exactly what would be created without actually writing anything.
 ### Step 3: Import
 
 ```bash
-passcli import your_export.csv
+passclip import your_export.csv
 ```
 
-PassCLI auto-detects the format from the CSV headers. If auto-detection gets it wrong, you can specify:
+Passclip auto-detects the format from the CSV headers. If auto-detection gets it wrong, you can specify:
 
 ```bash
-passcli import your_export.csv --format bitwarden
-passcli import your_export.csv --format lastpass
-passcli import your_export.csv --format 1password
+passclip import your_export.csv --format bitwarden
+passclip import your_export.csv --format lastpass
+passclip import your_export.csv --format 1password
 ```
 
 ### Step 4: Clean up
@@ -344,8 +337,8 @@ passcli import your_export.csv --format 1password
 After verifying everything imported correctly:
 
 1. Delete the CSV file — it contains your passwords in plaintext
-2. Run `passcli health` to check for weak or duplicate passwords
-3. Run `passcli sync` to push the new entries to your git remote
+2. Run `passclip health` to check for weak or duplicate passwords
+3. Run `passclip sync` to push the new entries to your git remote
 
 ---
 
@@ -370,10 +363,10 @@ Add that to your shell profile so you don't have to type it every time.
 
 ### "Password store not found"
 
-PassCLI looks at `~/.password-store` by default. If your store is somewhere else:
+Passclip looks at `~/.password-store` by default. If your store is somewhere else:
 
 ```bash
-passcli config pass_dir /path/to/your/store
+passclip config pass_dir /path/to/your/store
 ```
 
 Or set the environment variable:
@@ -387,20 +380,20 @@ export PASSWORD_STORE_DIR=/path/to/your/store
 The password store is not initialized, or the configured GPG key is no longer available.
 
 ```bash
-passcli gpg_list    # check available keys
-passcli init        # re-initialize with an available key
+passclip gpg_list    # check available keys
+passclip init        # re-initialize with an available key
 ```
 
 ### "Cannot decrypt" or "GPG key error"
 
-PassCLI gives you specific messages:
+Passclip gives you specific messages:
 - **"Entry not found"** — the entry doesn't exist. Run `ls` to see what's available.
 - **"Cannot decrypt"** — your GPG key is locked or it's the wrong key. Try `gpg --card-status` to check.
 - **"GPG key error"** — the encryption key is missing or unusable. Run `gpg_list` to verify.
 
 ### Clipboard not working
 
-PassCLI uses `pyperclip` for clipboard access, which needs a clipboard tool on your system:
+Passclip uses `pyperclip` for clipboard access, which needs a clipboard tool on your system:
 
 - **macOS**: `pbcopy` is built in, nothing to install
 - **Linux (X11)**: install `xclip` or `xsel` — `sudo apt install xclip`
@@ -451,4 +444,4 @@ Entries are skipped if they have no name or no password. Check your CSV:
 - Bitwarden: secure notes export as a different type — only login entries have passwords
 - LastPass: "secure notes" and "form fills" have no password field
 
-Run the import and note which entries show a skip marker — you can add them manually with `passcli insert`.
+Run the import and note which entries show a skip marker — you can add them manually with `passclip insert`.

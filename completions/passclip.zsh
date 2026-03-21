@@ -1,9 +1,9 @@
-#compdef passcli pass_cli.py
+#compdef passclip passclip.py
 
-# Zsh completion for PassCLI
+# Zsh completion for Passclip
 # Add to fpath or source directly
 
-_passcli_entries() {
+_passclip_entries() {
     local pass_dir="${PASSWORD_STORE_DIR:-$HOME/.password-store}"
     if [[ -d "$pass_dir" ]]; then
         find "$pass_dir" -name '*.gpg' -not -path '*/.git/*' 2>/dev/null | \
@@ -11,7 +11,7 @@ _passcli_entries() {
     fi
 }
 
-_passcli() {
+_passclip() {
     local -a commands
     commands=(
         'get:Show a password entry'
@@ -52,7 +52,7 @@ _passcli() {
 
     case "${words[2]}" in
         get|show|clip|edit|delete|otp|archive|generate|mv|cp)
-            compadd $(_passcli_entries)
+            compadd $(_passclip_entries)
             ;;
         import)
             _arguments \
@@ -67,9 +67,9 @@ _passcli() {
             compadd clip_timeout default_password_length default_mode pass_dir
             ;;
         restore)
-            compadd $(_passcli_entries | grep '^archive/' | sed 's|^archive/||')
+            compadd $(_passclip_entries | grep '^archive/' | sed 's|^archive/||')
             ;;
     esac
 }
 
-_passcli "$@"
+_passclip "$@"

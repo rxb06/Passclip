@@ -1,4 +1,4 @@
-# Contributing to PassCLI
+# Contributing to Passclip
 
 Thanks for your interest in contributing. Here's how to get involved.
 
@@ -6,7 +6,7 @@ Thanks for your interest in contributing. Here's how to get involved.
 
 ## Ways to contribute
 
-- **Bug reports** — found something broken? Open an issue with steps to reproduce, your OS, Python version, and `passcli --version` output.
+- **Bug reports** — found something broken? Open an issue with steps to reproduce, your OS, Python version, and `passclip --version` output.
 - **Feature requests** — have an idea? Open an issue and describe the use case. What problem does it solve? How would you use it?
 - **Code** — fixes, improvements, new features. See below for the process.
 - **Documentation** — typo fixes, better explanations, new examples. Always welcome.
@@ -29,16 +29,16 @@ Thanks for your interest in contributing. Here's how to get involved.
 git clone <repo-url>
 cd Passcli
 
-# Install dependencies
-pip install rich cryptography pyperclip pyotp
+# Install in editable mode with all dependencies
+pip install -e ".[all,dev]"
 
-# Make sure pass and GPG are installed (see docs/SETUP.md)
+# Make sure pass and GPG are installed (see docs/setup.md)
 
 # Run it
-python pass_cli.py --version
+python passclip.py --version
 ```
 
-There's no build step. PassCLI is a single Python file (`pass_cli.py`) with standard library + a few pip packages.
+There's no build step. Passclip is a single Python file (`passclip.py`) with standard library + a few pip packages.
 
 ---
 
@@ -55,7 +55,7 @@ There's no build step. PassCLI is a single Python file (`pass_cli.py`) with stan
    - Subprocess calls use list arguments (never `shell=True`)
    - Entry names go through `validate_entry_name()` before any write
 
-3. Test your changes manually. PassCLI doesn't have an automated test suite yet (contributions welcome!), so verify:
+3. Test your changes manually. Run `pytest` to check existing tests, and verify:
    - The happy path works
    - Edge cases are handled (empty input, missing entries, bad permissions)
    - Nothing breaks in the interactive shell
