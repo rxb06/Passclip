@@ -3,7 +3,6 @@
 [![PyPI](https://img.shields.io/pypi/v/passclip?color=blue)](https://pypi.org/project/passclip/)
 [![CI](https://github.com/rxb06/Passclip/actions/workflows/ci.yml/badge.svg)](https://github.com/rxb06/Passclip/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/rxb06/Passclip)](LICENSE)
-[![Python](https://img.shields.io/pypi/pyversions/passclip)](https://pypi.org/project/passclip/)
 
 A security-focused CLI interface for managing and accessing secrets.
 
