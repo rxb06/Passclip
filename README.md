@@ -4,11 +4,11 @@
 [![CI](https://github.com/rxb06/Passclip/actions/workflows/ci.yml/badge.svg)](https://github.com/rxb06/Passclip/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/rxb06/Passclip)](LICENSE)
 
-A CLI built on top of [`pass`](https://www.passwordstore.org/) that adds what it's missing — structured entries, clipboard auto-clear, TOTP, password health checks, CSV import, encrypted backups, and an interactive shell.
+`pass` handles encryption and git. Passclip handles everything around it.
 
 <img width="1280" height="640" alt="passclip" src="https://github.com/user-attachments/assets/c72ec8f0-137c-4477-92a9-a2f1ec955810" />
 
-`pass` handles encryption and git. Passclip handles everything around it.
+A CLI built on top of [`pass`](https://www.passwordstore.org/) that adds what it's missing — structured entries, clipboard auto-clear, TOTP, password health checks, CSV import, encrypted backups, and an interactive shell.
 
 ---
 
@@ -52,9 +52,9 @@ No subcommand needed. Type a search term — Passclip finds the entry and copies
 
 ---
 
-## Why not just use `pass`?
+## What Passclip adds
 
-You should. `pass` is solid — one GPG-encrypted file per password, a directory tree as your database, and git for sync. Passclip doesn't replace any of that. It uses `pass` under the hood for every read and write.
+`pass` is solid — one GPG-encrypted file per password, a directory tree as your database, and git for sync. Passclip doesn't replace any of that. It uses `pass` under the hood for every read and write.
 
 But `pass` is intentionally minimal, and that minimalism has real gaps in daily use:
 
