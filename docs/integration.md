@@ -146,7 +146,7 @@ pip install passclip[all]
 
 ### System requirements
 
-Passclip is built on top of `pass` and GPG — those need to be installed separately:
+Passclip uses `pass` and GPG under the hood — those need to be installed separately:
 
 ```bash
 # macOS

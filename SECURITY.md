@@ -40,7 +40,7 @@ Please **do not** open a public GitHub issue for security vulnerabilities. This 
 
 ## Security model
 
-Passclip is a security-focused CLI interface built on top of [`pass`](https://www.passwordstore.org/), the standard Unix password manager. It does not implement its own encryption for the password store — that's all handled by GPG through `pass`. Here's what Passclip is responsible for and what it isn't.
+Passclip is a CLI built on top of [`pass`](https://www.passwordstore.org/), the standard Unix password manager. It does not implement its own encryption for the password store — that's all handled by GPG through `pass`. Every read and write goes through `pass`. Here's what Passclip is responsible for and what it isn't.
 
 ### What Passclip handles
 

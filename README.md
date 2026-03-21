@@ -4,12 +4,11 @@
 [![CI](https://github.com/rxb06/Passclip/actions/workflows/ci.yml/badge.svg)](https://github.com/rxb06/Passclip/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/rxb06/Passclip)](LICENSE)
 
-A security-focused CLI interface for managing and accessing secrets.
+A CLI built on top of [`pass`](https://www.passwordstore.org/) that adds what it's missing — structured entries, clipboard auto-clear, TOTP, password health checks, CSV import, encrypted backups, and an interactive shell.
 
 <img width="1280" height="640" alt="passclip" src="https://github.com/user-attachments/assets/c72ec8f0-137c-4477-92a9-a2f1ec955810" />
 
-
-Built on top of the Unix password manager [`pass`](https://www.passwordstore.org/), Passclip extends its simplicity with structured entries, secure clipboard handling, TOTP support, and health auditing. Designed for engineers who need reliable, script-friendly access to credentials without exposing sensitive data — enabling safer secret handling across automation, tooling, and infrastructure workflows.
+`pass` handles encryption and git. Passclip handles everything around it.
 
 ---
 
@@ -53,9 +52,11 @@ No subcommand needed. Type a search term — Passclip finds the entry and copies
 
 ---
 
-## Why does this exist?
+## Why not just use `pass`?
 
-GNU `pass` is brilliant in its simplicity — one GPG-encrypted file per password, a directory tree as your database, and git for sync. It's the Unix philosophy done right. But in daily use, that minimalism starts to show its edges:
+You should. `pass` is solid — one GPG-encrypted file per password, a directory tree as your database, and git for sync. Passclip doesn't replace any of that. It uses `pass` under the hood for every read and write.
+
+But `pass` is intentionally minimal, and that minimalism has real gaps in daily use:
 
 **What `pass` gives you:**
 - Rock-solid GPG encryption
@@ -88,7 +89,7 @@ GNU `pass` is brilliant in its simplicity — one GPG-encrypted file per passwor
 | Deletes are permanent | Pre-delete backups to `~/.config/passclip/backups/`. |
 | No entry validation | Blocks path traversal, shell metacharacters, and bad input. |
 
-Passclip doesn't replace `pass` — it extends it. Your password store is still a directory of GPG files. You can switch back to plain `pass` at any time. No lock-in.
+Your password store is still a directory of GPG files. `pass show`, `pass insert`, `pass edit` — all still work. Passclip reads and writes through `pass`, not around it. No lock-in.
 
 ---
 

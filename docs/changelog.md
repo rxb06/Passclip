@@ -6,6 +6,29 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ---
 
+## [1.1.2] — 2026-03-21
+
+### Fixed
+
+- False positive in credential scan on `generate_password()` call (suppressed with inline ignore).
+- Entry validation on CLI-mode `mv`, `cp`, and `restore` commands now correctly unpacks the validation result — previously the tuple return was always truthy, so invalid names could slip through.
+
+### Changed
+
+- Dropped Python 3.8 and 3.9 support. Minimum is now Python 3.10.
+- CI test matrix updated to 3.10, 3.12, 3.13.
+- Ruff target version set to `py310`.
+- All lint warnings resolved (line length, unused imports, import sorting).
+- Documentation updated to reflect Python 3.10+ requirement throughout.
+- Narrative updated across all docs — honest about being built on `pass`, clearer about what Passclip adds on top.
+
+### Added
+
+- PyPI, CI, license, and Python version badges in README.
+- `uv.lock` added to `.gitignore`.
+
+---
+
 ## [1.1.0] — 2026-03-20
 
 UX overhaul — fewer keystrokes for the things you do every day.

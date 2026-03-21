@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "passclip"
 version = "1.1.2"
-description = "Security-focused CLI interface for managing and accessing secrets"
+description = "CLI built on top of pass — adds structured entries, clipboard auto-clear, TOTP, health checks, and more"
 readme = "README.md"
 license = "GPL-3.0-only"
 requires-python = ">=3.10"

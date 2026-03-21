@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Passclip — Security-focused CLI interface for managing and accessing secrets.
+Passclip — A CLI built on top of `pass` that adds what it's missing.
 
-Built on top of `pass`, designed for engineers who need reliable, script-friendly
-access to credentials across automation, tooling, and infrastructure workflows.
+Structured entries, clipboard auto-clear, TOTP, password health checks,
+CSV import, encrypted backups, and an interactive shell.
 
 Quick copy (the fast path):
   passclip gmail                    # Fuzzy match → copy password
@@ -2232,7 +2232,7 @@ class PassShell(cmd.Cmd):
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="passclip",
-        description="Passclip — Security-focused CLI for managing secrets via pass",
+        description="Passclip — A CLI built on top of pass that adds what it's missing",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Quick copy (the fast path — no subcommand needed):\n"

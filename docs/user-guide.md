@@ -22,21 +22,17 @@ A complete walkthrough of what Passclip does, who it's for, and how to get the m
 
 ## Who is this for?
 
-### The engineer
+Anyone who uses `pass` and wants less friction.
 
-You manage secrets across services, infrastructure, and CI/CD pipelines. You need credentials injected into builds without `.env` files on disk. You want structured entries you can query programmatically. The `run` command, structured `key: value` format, and fuzzy-copy shortcuts are built for this workflow.
+If you find yourself doing `pass show email/gmail | head -1 | pbcopy` multiple times a day, or editing GPG files by hand to add a TOTP secret, or wondering which of your 200 entries still has a weak password — Passclip fills those gaps.
 
-### The security-conscious practitioner
+A few specific use cases:
 
-Your threat model says secrets should never leave your machine unencrypted. You don't trust cloud password managers — not because they're insecure, but because local GPG-encrypted storage with git-based sync is the architecture you want. `pass` provides the foundation. Passclip makes it practical with health auditing, clipboard auto-clear, and entry validation.
-
-### The power user migrating from another manager
-
-You have a Bitwarden or LastPass export and want to move to a local, offline, GPG-encrypted store. The `import` command handles this in one step with format auto-detection.
-
-### Anyone who uses `pass` daily
-
-You like `pass` but the ergonomics slow you down. You want one command to grab a password, tab completion in a REPL, TOTP codes without a separate extension, and a health report that flags weak or reused credentials. Passclip's `wizard` sets everything up, and `passclip gmail` is all you need day to day.
+- **You use `pass` daily** but want `passclip gmail` instead of `pass show email/gmail`. One command, fuzzy matched, copied to clipboard, auto-cleared.
+- **You inject secrets into scripts or dev tools** and want `passclip run aws/prod -- aws s3 ls` instead of managing `.env` files.
+- **You're migrating from Bitwarden, LastPass, or 1Password** and want `passclip import export.csv` instead of a manual import script.
+- **You want to know where your weak passwords are** — `passclip health` scans every entry and flags weak or reused passwords.
+- **You want TOTP without a separate extension** — `passclip otp --add` to set up, `passclip gmail -o` to copy a code.
 
 ---
 
@@ -791,4 +787,4 @@ passclip export-vault ~/vault-pre-rotation-$(date +%Y%m%d).vault
 
 ---
 
-*Passclip extends `pass` — it doesn't replace it. `pass` and GPG are doing the encryption. If you ever need to step outside Passclip — for scripting, for a feature not yet built, or for troubleshooting — raw `pass` commands work exactly as documented at [passwordstore.org](https://www.passwordstore.org/). Nothing is locked in.*
+*Passclip is built on `pass`. `pass` and GPG do the encryption. If you ever need to step outside Passclip — for scripting, for a feature not yet built, or for troubleshooting — raw `pass` commands work exactly as documented at [passwordstore.org](https://www.passwordstore.org/). Nothing is locked in.*
