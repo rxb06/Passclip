@@ -84,7 +84,7 @@ sudo pacman -S fzf xclip
 
 ### Python dependencies
 
-Passclip needs Python 3.8 or later. Install via pip:
+Passclip needs Python 3.10 or later. Install via pip:
 
 ```bash
 pip install passclip[all]

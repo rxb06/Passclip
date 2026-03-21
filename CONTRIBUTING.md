@@ -27,7 +27,7 @@ Thanks for your interest in contributing. Here's how to get involved.
 ```bash
 # Clone the repo
 git clone <repo-url>
-cd Passcli
+cd Passclip
 
 # Install in editable mode with all dependencies
 pip install -e ".[all,dev]"
@@ -50,7 +50,7 @@ There's no build step. Passclip is a single Python file (`passclip.py`) with sta
    ```
 
 2. Make your changes. Keep the style consistent with the existing code:
-   - Python 3.8+ compatible
+   - Python 3.10+ compatible
    - Use `rich` for terminal output (no raw `print` for user-facing messages)
    - Subprocess calls use list arguments (never `shell=True`)
    - Entry names go through `validate_entry_name()` before any write
