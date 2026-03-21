@@ -638,7 +638,7 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
                 default=CONFIG.get("default_password_length", 20),
             )
             use_symbols = Confirm.ask("[dim]Include symbols?[/dim]", default=True)
-            password = generate_password(length, use_symbols)
+            password = generate_password(length, use_symbols)  # credactor:ignore
             console.print(f"[green]Generated:[/green] {password}")
         score, label, color = password_strength(password)
         console.print(f"  Strength: {strength_bar(score, color)} [dim]{label}[/dim]")
