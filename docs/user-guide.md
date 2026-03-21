@@ -549,7 +549,7 @@ Passclip is your local source of truth. CI systems have their own secret stores 
 ### Fresh start (no existing passwords)
 
 ```bash
-pip install rich cryptography pyperclip pyotp
+pip install passclip[all]
 passclip wizard
 ```
 
@@ -561,7 +561,7 @@ The wizard generates a GPG key, initializes the store, and sets up git. Done.
 
 ```bash
 git clone git@github.com:you/your-pass-store.git ~/.password-store
-pip install rich cryptography pyperclip pyotp
+pip install passclip[all]
 passclip ls    # verify it works
 ```
 
@@ -580,7 +580,7 @@ rm private.key
 **Option B — Vault restore** (if you have an encrypted backup):
 
 ```bash
-pip install rich cryptography pyperclip pyotp
+pip install passclip[all]
 passclip wizard               # set up GPG and empty store
 passclip import-vault ~/backup.vault     # restore everything
 ```

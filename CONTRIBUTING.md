@@ -35,7 +35,7 @@ pip install -e ".[all,dev]"
 # Make sure pass and GPG are installed (see docs/setup.md)
 
 # Run it
-python passclip.py --version
+passclip --version
 ```
 
 There's no build step. Passclip is a single Python file (`passclip.py`) with standard library + a few pip packages.
