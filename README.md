@@ -6,6 +6,9 @@
 
 A security-focused CLI interface for managing and accessing secrets.
 
+<img width="1280" height="640" alt="passclip" src="https://github.com/user-attachments/assets/c72ec8f0-137c-4477-92a9-a2f1ec955810" />
+
+
 Built on top of the Unix password manager [`pass`](https://www.passwordstore.org/), Passclip extends its simplicity with structured entries, secure clipboard handling, TOTP support, and health auditing. Designed for engineers who need reliable, script-friendly access to credentials without exposing sensitive data — enabling safer secret handling across automation, tooling, and infrastructure workflows.
 
 ---
