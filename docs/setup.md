@@ -191,6 +191,74 @@ pip install -e ".[all]"
 
 ---
 
+## Making it a global command
+
+After `pip install passclip[all]`, the `passclip` binary is placed in pip's scripts directory. Whether it's immediately available depends on whether that directory is in your `PATH`.
+
+### Verify it worked
+
+```bash
+which passclip
+passclip --version
+```
+
+If either of those works, you're done.
+
+### If you get "command not found"
+
+Pip puts scripts in different places depending on how it's invoked:
+
+**Linux — user install (`pip install --user`)**
+
+The binary lands in `~/.local/bin`, which many distros don't include in `PATH` by default.
+
+```bash
+# Confirm where pip installed it
+python3 -m site --user-base
+# → /home/you/.local  (binary is at /home/you/.local/bin/passclip)
+
+# Add to PATH
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+For zsh: replace `~/.bashrc` with `~/.zshrc`.
+
+**macOS — system Python**
+
+Scripts may land in `~/Library/Python/3.x/bin`. Use `python3 -m site --user-base` to get the exact path for your Python version:
+
+```bash
+echo "export PATH=\"$(python3 -m site --user-base)/bin:\$PATH\"" >> ~/.zshrc
+source ~/.zshrc
+```
+
+Homebrew Python and pyenv both add their bin directories to `PATH` automatically, so this usually isn't an issue if you installed Python via Homebrew.
+
+### Recommended: use pipx
+
+`pipx` installs Python CLI tools into isolated environments and makes them globally available — no PATH configuration needed.
+
+```bash
+# Install pipx
+brew install pipx                 # macOS
+pip install --user pipx           # Linux, then run: pipx ensurepath
+
+# Install Passclip
+pipx install "passclip[all]"
+
+# Verify
+passclip --version
+```
+
+This is the cleanest option if you want Passclip available everywhere without touching your shell config.
+
+### From a source install
+
+`pip install -e ".[all]"` (run from the cloned repo) registers the `passclip` entrypoint the same way as a regular install — the binary goes into pip's scripts directory. The same PATH rules above apply. You don't need to `cd` into the repo or invoke `python passclip.py` directly.
+
+---
+
 ## Shell completions
 
 Tab completion makes a huge difference when you have dozens of entries. We ship completion scripts for bash, zsh, and fish.
@@ -246,10 +314,12 @@ passclip config default_password_length 24
 
 | Key | Default | What it controls |
 |---|---|---|
-| `clip_timeout` | `45` | Seconds before clipboard is auto-cleared |
-| `default_password_length` | `20` | Default length for generated passwords |
+| `clip_timeout` | `45` | Seconds before clipboard is auto-cleared (minimum: 1) |
+| `default_password_length` | `20` | Default length for generated passwords (minimum: 8) |
 | `default_mode` | `shell` | What happens when you run `passclip` with no args (`shell` or `ls`) |
 | `pass_dir` | `~/.password-store` | Path to your password store |
+
+Invalid values are automatically reset to defaults on load. For example, setting `clip_timeout` to `0` or a negative number resets it to `45`. Setting `default_password_length` below `8` resets it to `20`. Setting `default_mode` to anything other than `shell` or `ls` resets it to `shell`.
 
 ### Changing the password store location
 

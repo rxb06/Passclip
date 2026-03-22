@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "passclip"
-version = "1.1.2"
+version = "1.1.3"
 description = "Security-focused CLI for managing secrets in GPG-backed environments. Extends pass with TOTP, AES-256-GCM backups, secure clipboard handling, and runtime secret injection."
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -43,9 +43,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-clipboard = ["pyperclip"]
-otp = ["pyotp"]
-all = ["pyperclip", "pyotp"]
+clipboard = ["pyperclip>=1.8"]
+otp = ["pyotp>=2.8"]
+all = ["pyperclip>=1.8", "pyotp>=2.8"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.scripts]

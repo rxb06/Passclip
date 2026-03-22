@@ -28,7 +28,7 @@ Shell shortcuts (inside the interactive shell):
   o gmail                           # Copy OTP code (fuzzy)
 """
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 import argparse
 import cmd
@@ -86,16 +86,31 @@ DEFAULT_CONFIG: Dict = {
 
 
 def load_config() -> Dict:
+    """Load config from disk, merged with defaults. Validates value bounds."""
+    cfg = DEFAULT_CONFIG.copy()
     if CONFIG_PATH.exists():
         try:
             with open(CONFIG_PATH) as f:
-                return {**DEFAULT_CONFIG, **json.load(f)}
-        except Exception:
-            pass
-    return DEFAULT_CONFIG.copy()
+                cfg = {**DEFAULT_CONFIG, **json.load(f)}
+        except Exception as exc:
+            console.print(
+                f"[yellow]Warning: Could not parse config ({CONFIG_PATH}): {exc}[/yellow]\n"
+                "[dim]Using defaults.[/dim]"
+            )
+            return DEFAULT_CONFIG.copy()
+    # Validate bounds
+    if not isinstance(cfg.get("clip_timeout"), int) or cfg["clip_timeout"] < 1:
+        cfg["clip_timeout"] = DEFAULT_CONFIG["clip_timeout"]
+    pw_len = cfg.get("default_password_length")
+    if not isinstance(pw_len, int) or pw_len < 8:
+        cfg["default_password_length"] = DEFAULT_CONFIG["default_password_length"]
+    if cfg.get("default_mode") not in ("shell", "ls"):
+        cfg["default_mode"] = DEFAULT_CONFIG["default_mode"]
+    return cfg
 
 
 def save_config(config: Dict) -> None:
+    """Persist config to disk with 0o600 permissions."""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(CONFIG_PATH), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -111,6 +126,7 @@ CONFIG = load_config()
 
 
 def check_dependencies() -> Dict[str, bool]:
+    """Detect which optional tools and packages are available."""
     deps: Dict[str, bool] = {}
     for tool in ["pass", "gpg", "fzf", "git"]:
         deps[tool] = shutil.which(tool) is not None
@@ -321,10 +337,11 @@ def _spawn_clipboard_clear(text: str, timeout: int) -> None:
 
     # Native-tool fallback: unconditional clear after timeout.
     # (No paste-check possible without pyperclip.)
+    safe_timeout = int(timeout)
     for tool, clear_cmd in [
-        ("pbcopy",  f"sleep {timeout} && printf '' | pbcopy"),
-        ("xclip",   f"sleep {timeout} && printf '' | xclip -selection clipboard"),
-        ("wl-copy", f"sleep {timeout} && printf '' | wl-copy"),
+        ("pbcopy",  f"sleep {safe_timeout} && printf '' | pbcopy"),
+        ("xclip",   f"sleep {safe_timeout} && printf '' | xclip -selection clipboard"),
+        ("wl-copy", f"sleep {safe_timeout} && printf '' | wl-copy"),
     ]:
         if shutil.which(tool):
             try:
@@ -411,6 +428,7 @@ def _read_clipboard() -> Optional[str]:
 
 
 def parse_entry(content: str) -> Dict[str, str]:
+    """Parse a pass entry into a dict. First line is 'password', rest are 'key: value' pairs."""
     lines = content.splitlines()
     data: Dict[str, str] = {"password": lines[0] if lines else ""}
     for line in lines[1:]:
@@ -424,6 +442,7 @@ def parse_entry(content: str) -> Dict[str, str]:
 
 
 def format_entry(data: Dict[str, str]) -> str:
+    """Serialize a dict back into the pass entry format (password on first line)."""
     lines = [data.get("password", "")]
     for key in ("username", "email", "url", "otp"):
         if data.get(key):
@@ -533,6 +552,7 @@ def password_strength(password: str) -> Tuple[int, str, str]:
 
 
 def strength_bar(score: int, color: str) -> str:
+    """Return a rich-formatted bar visualization of password strength (0-4)."""
     return f"[{color}]{'█' * (score + 1)}{'░' * (4 - score)}[/{color}]"
 
 
@@ -1686,6 +1706,7 @@ def cmd_wizard() -> None:
 
 
 def cmd_config_show() -> None:
+    """Display all current config values in a table."""
     t = Table(title="Passclip Config", box=box.SIMPLE)
     t.add_column("Key", style="cyan")
     t.add_column("Value")
@@ -1703,6 +1724,7 @@ def cmd_config_show() -> None:
 
 
 def cmd_config_set(key: str, value: str) -> None:
+    """Set a config key to a new value, with type coercion and validation."""
     if key not in DEFAULT_CONFIG:
         console.print(f"[red]Unknown key:[/red] {key}")
         console.print(f"Valid keys: {', '.join(DEFAULT_CONFIG)}")
@@ -1785,6 +1807,7 @@ class PassShell(cmd.Cmd):
         return [e for e in get_all_entries() if e.startswith(text)]
 
     def preloop(self) -> None:
+        """Display the welcome panel with entry count and feature status."""
         entries = get_all_entries()
         keys = get_gpg_keys()
         console.print(Panel(
@@ -2208,16 +2231,19 @@ class PassShell(cmd.Cmd):
         return True
 
     def do_exit(self, arg: str) -> bool:
+        """exit  Alias for quit."""
         return self.do_quit(arg)
 
     def do_EOF(self, arg: str) -> bool:
+        """Handle Ctrl-D (EOF) by exiting gracefully."""
         console.print()
         return self.do_quit(arg)
 
     def emptyline(self) -> None:
-        pass
+        """Do nothing on empty input (override cmd.Cmd default of repeating last command)."""
 
     def default(self, line: str) -> None:
+        """Handle unrecognized commands with an error message."""
         console.print(
             f"[red]Unknown command:[/red] {line}  "
             "— Type [bold]help[/bold] to see available commands."
@@ -2230,6 +2256,7 @@ class PassShell(cmd.Cmd):
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser with all subcommands."""
     p = argparse.ArgumentParser(
         prog="passclip",
         description="Passclip — A CLI built on top of pass that adds what it's missing",
@@ -2387,6 +2414,7 @@ def _start_shell() -> None:
 
 
 def main() -> None:
+    """Entry point: dispatch to smart copy, a subcommand, or the interactive shell."""
     if len(sys.argv) == 1:
         _start_shell()
         return

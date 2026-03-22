@@ -42,6 +42,23 @@ There's no build step. Passclip is a single Python file (`passclip.py`) with sta
 
 ---
 
+## Running tests
+
+```bash
+# Run the full test suite
+python -m pytest tests/ -v
+
+# Run a specific test file
+python -m pytest tests/test_core.py -v
+
+# Run with the Makefile
+make test
+```
+
+The test suite covers config loading and validation, entry parsing and formatting, password strength scoring, password generation, CSV row parsing for all supported formats, entry path sanitization, and vault encryption roundtrip. When adding new features, add tests in `tests/` for any logic that can be tested without external dependencies (`pass`, `gpg`).
+
+---
+
 ## Making changes
 
 1. Create a branch from `main`:

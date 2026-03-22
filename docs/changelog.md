@@ -6,6 +6,30 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ---
 
+## [1.1.3] — 2026-03-22
+
+### Fixed
+
+- `clip_timeout` is now cast to `int` before shell string interpolation in the native clipboard fallback path, preventing potential issues if the config value is not an integer.
+- `load_config()` now logs a warning on corrupt or unparseable config files instead of silently falling back to defaults.
+
+### Changed
+
+- CI test matrix updated to 3.10, 3.11, 3.12, 3.13.
+- Optional dependencies pinned to minimum versions: `pyperclip>=1.8`, `pyotp>=2.8`.
+
+### Added
+
+- **Config validation** — `clip_timeout` (must be >= 1), `default_password_length` (must be >= 8), and `default_mode` (must be `shell` or `ls`) are validated on load. Invalid values are silently reset to defaults.
+- **Expanded test suite** — `tests/test_core.py` with 46 new tests covering config loading, entry parsing, password strength, password generation, CSV row parsing, entry path sanitization, and vault encryption roundtrip.
+- **Docstrings** — added to 15 public functions (`load_config`, `save_config`, `check_dependencies`, `parse_entry`, `format_entry`, `strength_bar`, `cmd_config_show`, `cmd_config_set`, `build_parser`, `main`, and shell methods).
+- **"Making it a global command" section** in `docs/setup.md` — covers PATH configuration for pip installs, platform-specific fixes, and `pipx` as an alternative.
+- **Environment inheritance note** in `docs/user-guide.md` — documents that `run` passes the full parent environment to the child process.
+- Fish completions for `gpg_gen`, `gpg_list`, and `shell` commands.
+- "Running tests" section in `CONTRIBUTING.md`.
+
+---
+
 ## [1.1.2] — 2026-03-21
 
 ### Fixed

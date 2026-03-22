@@ -36,9 +36,12 @@ complete -c passclip -f -n '__fish_use_subcommand' -a archive -d 'Archive entry'
 complete -c passclip -f -n '__fish_use_subcommand' -a restore -d 'Restore archived entry'
 complete -c passclip -f -n '__fish_use_subcommand' -a wizard -d 'First-time setup'
 complete -c passclip -f -n '__fish_use_subcommand' -a init -d 'Initialize password store'
+complete -c passclip -f -n '__fish_use_subcommand' -a gpg_gen -d 'Generate GPG key'
+complete -c passclip -f -n '__fish_use_subcommand' -a gpg_list -d 'List GPG keys'
 complete -c passclip -f -n '__fish_use_subcommand' -a config -d 'View/set config'
 complete -c passclip -f -n '__fish_use_subcommand' -a export-vault -d 'Export encrypted vault'
 complete -c passclip -f -n '__fish_use_subcommand' -a import-vault -d 'Import encrypted vault'
+complete -c passclip -f -n '__fish_use_subcommand' -a shell -d 'Start interactive shell'
 
 # Entry completions for commands that accept entries
 for cmd in get show clip edit delete otp archive generate mv cp

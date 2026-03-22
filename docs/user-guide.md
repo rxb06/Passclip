@@ -345,6 +345,8 @@ stripe.api_key = os.environ["PASS_PASSWORD"]
 | Need to update two places when secret rotates | Update pass, everything picks it up |
 | Shared across team via `.env.example` habit | Each person has their own vault |
 
+**A note on environment inheritance:** The child process inherits your full shell environment in addition to the injected `PASS_*` variables. If your shell already has sensitive variables set (e.g. `AWS_SECRET_ACCESS_KEY`, `GITHUB_TOKEN`), those are passed through to the child process too. This is standard Unix behavior and usually what you want, but be aware of it when running untrusted commands.
+
 ---
 
 ### export-vault / import-vault — encrypted backup

@@ -108,6 +108,8 @@ autoload -Uz compinit && compinit
 cp completions/passclip.fish ~/.config/fish/completions/
 ```
 
+All three completion scripts cover the full command set including `gpg_gen`, `gpg_list`, `export-vault`, `import-vault`, and `shell`. Entry names are completed dynamically from your password store.
+
 ---
 
 ## Shell aliases
