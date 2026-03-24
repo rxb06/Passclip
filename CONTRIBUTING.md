@@ -118,6 +118,12 @@ The test suite covers config loading and validation, entry parsing and formattin
 
 ---
 
+## Development process
+
+AI tools were used during development for code review, bug fixes, security auditing, and documentation structuring. All output was reviewed, tested, and validated manually. The architecture, design decisions, and feature selection are the maintainer's own.
+
+---
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same [GPLv3 license](LICENSE) that covers the project.

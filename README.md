@@ -237,7 +237,9 @@ Full policy: [SECURITY.md](SECURITY.md)
 
 ---
 
-> AI Use Transparency: AI was used for code review, bug fixes, security auditing, and documentation structuring. All output was reviewed and validated manually.
+## TL;DR
+
+A thin subprocess-isolated wrapper over `pass` + GPG for scriptable, CI-friendly secret access — structured parsing, TOTP, health auditing, AES-256-GCM vault backups, secure clipboard, fzf search, env-var injection, and CSV import from Bitwarden/LastPass/1Password.
 
 ---
 
