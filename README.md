@@ -4,6 +4,9 @@
 [![CI](https://github.com/rxb06/Passclip/actions/workflows/ci.yml/badge.svg)](https://github.com/rxb06/Passclip/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/rxb06/Passclip)](LICENSE)
 
+> **TL;DR:** A thin subprocess-isolated wrapper over `pass` + GPG for scriptable, CI-friendly secret access - structured parsing, TOTP, health auditing, AES-256-GCM vault backups, secure clipboard, fzf search, env-var injection, and CSV import from Bitwarden/LastPass/1Password.
+
+
 `pass` handles encryption and git. Passclip handles everything around it.
 
 <img width="1280" height="640" alt="passclip" src="https://github.com/user-attachments/assets/c72ec8f0-137c-4477-92a9-a2f1ec955810" />
@@ -236,17 +239,9 @@ Full policy: [SECURITY.md](SECURITY.md)
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
 
 ---
-
-## TL;DR
-
-A thin subprocess-isolated wrapper over `pass` + GPG for scriptable, CI-friendly secret access — structured parsing, TOTP, health auditing, AES-256-GCM vault backups, secure clipboard, fzf search, env-var injection, and CSV import from Bitwarden/LastPass/1Password.
-
----
-
 ## License
 
 Licensed under the [GNU General Public License v3.0](LICENSE).
 
 ---
-
 *Passclip is a personal open-source project. It is not audited by a third party. See [docs/disclaimer.md](docs/disclaimer.md) for details.*
