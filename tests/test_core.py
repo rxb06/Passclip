@@ -1,9 +1,9 @@
-"""Tests for core functions: config, entry parsing, password strength, CSV parsing, and vault crypto."""
+"""Tests for core functions: config, entry parsing, password strength,
+CSV parsing, and vault crypto."""
 
 import json
 import os
 import tempfile
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -22,7 +22,6 @@ from passclip import (
     save_config,
     strength_bar,
 )
-
 
 # ---------------------------------------------------------------------------
 # Config

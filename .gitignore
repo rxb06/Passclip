@@ -16,6 +16,7 @@ build/
 venv/
 env/
 ENV/
+.claude/
 
 # Testing
 .pytest_cache/
@@ -35,8 +36,8 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 
-# Claude Code
-.claude/
+# Private maintainer docs (never commit)
+mydocs/
 
 # C TUI (not part of this release)
 passtui/
