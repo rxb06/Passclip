@@ -786,7 +786,7 @@ def cmd_health() -> None:
             data = parse_entry(content)
             pw = data.get("password", "")
             score, label, color = password_strength(pw)
-            phash = hashlib.sha256(pw.encode()).hexdigest()
+            phash = hashlib.sha256(pw.encode()).hexdigest()  # noqa: S324 - duplicate detection only, not password storage
             hash_map.setdefault(phash, []).append(entry)
             results.append({
                 "entry": entry, "score": score, "label": label,

@@ -1,6 +1,5 @@
 """Tests for entry name validation and input sanitization."""
 
-import pytest
 
 from passclip import validate_entry_name
 
