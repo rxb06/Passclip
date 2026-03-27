@@ -28,12 +28,14 @@ Shell shortcuts (inside the interactive shell):
   o gmail                           # Copy OTP code (fuzzy)
 """
 
-__version__ = "1.1.3"
+__version__ = "1.2.0"
 
 import argparse
 import cmd
 import csv
+import fcntl
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -76,6 +78,10 @@ signal.signal(signal.SIGINT, _sigint_handler)
 # Configuration
 # ---------------------------------------------------------------------------
 
+MAX_FIELD_LENGTH = 65_536  # 64 KB per entry field — prevents OOM from pasted data
+MAX_ENTRY_NAME_LEN = 200
+MAX_PATH_DEPTH = 10
+PBKDF2_ITERATIONS = 600_000
 CONFIG_PATH = Path.home() / ".config" / "passclip" / "config.json"
 DEFAULT_CONFIG: Dict = {
     "clip_timeout": 45,
@@ -98,6 +104,10 @@ def load_config() -> Dict:
                 "[dim]Using defaults.[/dim]"
             )
             return DEFAULT_CONFIG.copy()
+    # Warn on unrecognized keys (catches typos in config.json)
+    unknown = set(cfg.keys()) - set(DEFAULT_CONFIG.keys())
+    for key in sorted(unknown):
+        console.print(f"[dim]Warning: unrecognized config key '{key}' — ignored.[/dim]")
     # Validate bounds
     if not isinstance(cfg.get("clip_timeout"), int) or cfg["clip_timeout"] < 1:
         cfg["clip_timeout"] = DEFAULT_CONFIG["clip_timeout"]
@@ -177,6 +187,19 @@ def run_command(
         return "", f"OS error running '{command_parts[0]}': {e}", 1
 
 
+def _insert_entry(entry: str, content: str) -> Tuple[bool, str]:
+    """Write content to a pass entry. Returns (success, error_message)."""
+    proc = subprocess.Popen(
+        ["pass", "insert", "-m", "-f", entry],
+        stdin=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    _, stderr = proc.communicate(content)
+    if proc.returncode != 0:
+        return False, stderr.strip()
+    return True, ""
+
+
 def _error(msg: str, hint: str = "") -> None:
     """Print a consistently formatted error message."""
     console.print(f"[red]Error:[/red] {msg}")
@@ -188,14 +211,14 @@ def validate_entry_name(name: str) -> Tuple[bool, str]:
     """Validate a pass entry name. Returns (ok, error_message)."""
     if not name or not name.strip():
         return False, "Entry name cannot be empty."
-    if len(name) > 200:
-        return False, "Entry name too long (max 200 characters)."
+    if len(name) > MAX_ENTRY_NAME_LEN:
+        return False, f"Entry name too long (max {MAX_ENTRY_NAME_LEN} characters)."
     if ".." in name:
         return False, "Entry name cannot contain '..'."
     if name.startswith("/") or name.startswith("-"):
         return False, "Entry name cannot start with '/' or '-'."
-    if name.count("/") > 10:
-        return False, "Entry name has too many path components (max 10)."
+    if name.count("/") > MAX_PATH_DEPTH:
+        return False, f"Entry name has too many path components (max {MAX_PATH_DEPTH})."
     # Reject shell metacharacters and dangerous characters
     if any(c in name for c in "`$(){}|;&<>!\\\x00"):
         return False, "Entry name contains invalid characters."
@@ -263,7 +286,7 @@ def fuzzy_select(entries: List[str], prompt_text: str = "Select entry") -> Optio
             if result.returncode == 0:
                 return result.stdout.strip()
             return None
-        except Exception:
+        except (FileNotFoundError, subprocess.SubprocessError):
             pass
 
     # Fallback: numbered list with optional text filter
@@ -311,13 +334,13 @@ def _spawn_clipboard_clear(text: str, timeout: int) -> None:
         # Compare before clearing so we don't clobber unrelated clipboard content
         # the user may have copied after us.
         script = (
-            "import os, time\n"
+            "import hmac, os, time\n"
             "try:\n"
             "    import pyperclip\n"
             "    t = os.environ.get('_PASSCLIP_CLIP_TEXT', '')\n"
             "    s = int(os.environ.get('_PASSCLIP_CLIP_TIMEOUT', '45'))\n"
             "    time.sleep(s)\n"
-            "    if pyperclip.paste() == t:\n"
+            "    if hmac.compare_digest(pyperclip.paste(), t):\n"
             "        pyperclip.copy('')\n"
             "except Exception:\n"
             "    pass\n"
@@ -332,27 +355,35 @@ def _spawn_clipboard_clear(text: str, timeout: int) -> None:
                 close_fds=True,
             )
             return
-        except Exception:
+        except (FileNotFoundError, OSError):
             pass
 
     # Native-tool fallback: unconditional clear after timeout.
     # (No paste-check possible without pyperclip.)
-    safe_timeout = int(timeout)
-    for tool, clear_cmd in [
-        ("pbcopy",  f"sleep {safe_timeout} && printf '' | pbcopy"),
-        ("xclip",   f"sleep {safe_timeout} && printf '' | xclip -selection clipboard"),
-        ("wl-copy", f"sleep {safe_timeout} && printf '' | wl-copy"),
-    ]:
+    # Uses sleep + pipe without bash -c to avoid shell format strings.
+    safe_timeout = str(int(timeout))
+    clear_cmds = [
+        ("pbcopy",  ["pbcopy"]),
+        ("xclip",   ["xclip", "-selection", "clipboard"]),
+        ("wl-copy", ["wl-copy"]),
+    ]
+    for tool, pipe_cmd in clear_cmds:
         if shutil.which(tool):
             try:
+                # sleep in a detached Python one-liner; avoids bash -c entirely
+                script = (
+                    f"import subprocess, time; time.sleep({safe_timeout}); "
+                    f"subprocess.run({pipe_cmd!r}, input='', text=True, "
+                    "capture_output=True)"
+                )
                 subprocess.Popen(
-                    ["bash", "-c", clear_cmd],
+                    [sys.executable, "-c", script],
                     start_new_session=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     close_fds=True,
                 )
-            except Exception:
+            except (FileNotFoundError, OSError):
                 pass
             return
 
@@ -367,7 +398,7 @@ def copy_to_clipboard(text: str, timeout: Optional[int] = None) -> bool:
         try:
             pyperclip.copy(text)
             copied = True
-        except Exception:
+        except (OSError, RuntimeError):
             pass
 
     if not copied:
@@ -378,7 +409,7 @@ def copy_to_clipboard(text: str, timeout: Optional[int] = None) -> bool:
                                    capture_output=True)
                     copied = True
                     break
-                except Exception:
+                except (FileNotFoundError, subprocess.SubprocessError):
                     continue
 
     if not copied:
@@ -405,7 +436,7 @@ def _read_clipboard() -> Optional[str]:
             val = pyperclip.paste()
             if val:
                 return val.strip()
-        except Exception:
+        except (OSError, RuntimeError):
             pass
     for cmd_args in [["pbpaste"], ["xclip", "-selection", "clipboard", "-o"], ["wl-paste"]]:
         if shutil.which(cmd_args[0]):
@@ -509,12 +540,13 @@ def generate_password(length: int = 20, symbols: bool = True) -> str:
 # Vault encryption
 # ---------------------------------------------------------------------------
 
-VAULT_MAGIC = b"PCV1"  # 4-byte header identifying Passclip vault files
+VAULT_MAGIC = b"PCV2"  # 4-byte header — v2 adds AAD authentication of salt+nonce
 
 
 def _derive_vault_key(passphrase: bytes, salt: bytes) -> bytes:
     """Derive a 32-byte AES-256 key from a passphrase using PBKDF2-SHA256 (600k iters)."""
-    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=600_000)
+    assert len(salt) == 32, f"Salt must be 32 bytes, got {len(salt)}"
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=PBKDF2_ITERATIONS)
     return kdf.derive(passphrase)
 
 
@@ -677,9 +709,16 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
                     else:
                         pyotp.TOTP(otp_secret.upper().replace(" ", ""))
                     console.print("[green]OTP secret validated.[/green]")
-                except Exception:
+                except (ValueError, TypeError, KeyError):
                     console.print("[yellow]Invalid OTP secret, skipping.[/yellow]")
                     otp_secret = ""
+        # Enforce field length limits to prevent OOM from pasted data
+        for fname, fval in [("password", password), ("username", username),
+                            ("email", email), ("url", url), ("notes", notes),
+                            ("otp", otp_secret)]:
+            if len(fval) > MAX_FIELD_LENGTH:
+                _error(f"Field '{fname}' exceeds {MAX_FIELD_LENGTH} bytes. Aborting.")
+                return
         data: Dict[str, str] = {"password": password}
         if username:
             data["username"] = username
@@ -700,16 +739,11 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
             console.print("[yellow]Cancelled.[/yellow]")
             return
 
-    proc = subprocess.Popen(
-        ["pass", "insert", "-m", "-f", entry],
-        stdin=subprocess.PIPE, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    _, stderr = proc.communicate(content)
-    if proc.returncode == 0:
+    ok, err = _insert_entry(entry, content)
+    if ok:
         console.print(f"[green]Saved '[bold]{entry}[/bold]' successfully.[/green]")
     else:
-        console.print(f"[red]Error:[/red] {stderr.strip()}")
+        console.print(f"[red]Error:[/red] {err}")
 
 
 def cmd_generate(
@@ -905,7 +939,7 @@ def cmd_otp(entry: Optional[str] = None) -> None:
     code = totp.now()
     remaining = 30 - (int(time.time()) % 30)
     console.print(Panel(
-        f"[bold green]{code[:3]} {code[3:]}[/bold green]\n"
+        f"[bold green]{code[:len(code)//2]} {code[len(code)//2:]}[/bold green]\n"
         f"[dim]Valid for {remaining}s  |  {entry}[/dim]",
         title="[bold]OTP Code[/bold]", border_style="green",
     ))
@@ -914,14 +948,27 @@ def cmd_otp(entry: Optional[str] = None) -> None:
 
 def _validate_otp_secret(secret: str) -> Optional[str]:
     """Validate an OTP secret string. Returns error message or None if valid."""
+    import base64
+
     import pyotp
     try:
         if secret.startswith("otpauth://"):
-            pyotp.parse_uri(secret)
+            parsed = pyotp.parse_uri(secret)
+            # Verify the parsed URI actually produced a usable TOTP
+            if not parsed.secret:
+                return "otpauth:// URI is missing the 'secret' parameter."
         else:
-            pyotp.TOTP(secret.upper().replace(" ", ""))
+            cleaned = secret.upper().replace(" ", "")
+            if len(cleaned) < 16:
+                return "OTP secret is too short (minimum 16 characters)."
+            # Verify it's valid base32
+            try:
+                base64.b32decode(cleaned, casefold=True)
+            except (ValueError, base64.binascii.Error):
+                return "OTP secret is not valid base32."
+            pyotp.TOTP(cleaned)
         return None
-    except Exception as e:
+    except (ValueError, TypeError, KeyError) as e:
         return str(e)
 
 
@@ -1002,14 +1049,9 @@ def cmd_otp_add(entry: Optional[str] = None) -> None:
 
     # Write back
     new_content = format_entry(data)
-    proc = subprocess.Popen(
-        ["pass", "insert", "-m", "-f", entry],
-        stdin=subprocess.PIPE, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    _, stderr = proc.communicate(new_content)
-    if proc.returncode != 0:
-        _error(f"Failed to save: {stderr.strip()}")
+    ok, err = _insert_entry(entry, new_content)
+    if not ok:
+        _error(f"Failed to save: {err}")
         return
 
     # Show the first code as confirmation
@@ -1020,13 +1062,14 @@ def cmd_otp_add(entry: Optional[str] = None) -> None:
         remaining = 30 - (int(time.time()) % 30)
         console.print(Panel(
             f"[green]OTP configured for[/green] [bold]{entry}[/bold]\n\n"
-            f"[bold green]{code[:3]} {code[3:]}[/bold green]\n"
+            f"[bold green]{code[:len(code)//2]} {code[len(code)//2:]}[/bold green]\n"
             f"[dim]Valid for {remaining}s[/dim]",
             title="[bold]OTP Added[/bold]", border_style="green",
         ))
         copy_to_clipboard(code, timeout=remaining + 2)
-    except Exception:
+    except Exception as e:
         console.print(f"[green]OTP secret saved to '{entry}'.[/green]")
+        console.print(f"[yellow]Warning: could not generate first code: {e}[/yellow]")
 
 
 def cmd_run(entry: str, command: List[str]) -> None:
@@ -1212,18 +1255,13 @@ def cmd_import(filepath: str, fmt: str = "auto", dry_run: bool = False) -> None:
                     if fields.get(key):
                         data[key] = fields[key]
 
-                proc = subprocess.Popen(
-                    ["pass", "insert", "-m", "-f", entry_path],
-                    stdin=subprocess.PIPE, text=True,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                )
-                _, stderr = proc.communicate(format_entry(data))
-                if proc.returncode == 0:
+                ok, err = _insert_entry(entry_path, format_entry(data))
+                if ok:
                     imported += 1
                     console.print(f"  [green]✓[/green] {entry_path}")
                 else:
                     skipped += 1
-                    console.print(f"  [red]✗[/red] {entry_path}: {stderr.strip()}")
+                    console.print(f"  [red]✗[/red] {entry_path}: {err}")
 
     except (csv.Error, UnicodeDecodeError) as e:
         _error(f"Failed to parse CSV: {e}")
@@ -1453,7 +1491,7 @@ def cmd_export_vault(output_path: str) -> None:
         console.print("[red]Passphrase cannot be empty.[/red]")
         return
     confirm = Prompt.ask("Confirm passphrase", password=True)
-    if passphrase != confirm:
+    if not hmac.compare_digest(passphrase, confirm):
         console.print("[red]Passphrases do not match.[/red]")
         return
 
@@ -1483,7 +1521,8 @@ def cmd_export_vault(output_path: str) -> None:
         salt = os.urandom(32)
         nonce = os.urandom(12)
         key = _derive_vault_key(passphrase.encode(), salt)
-        ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
+        aad = VAULT_MAGIC + salt + nonce
+        ciphertext = AESGCM(key).encrypt(nonce, plaintext, aad)
 
         progress.update(task, description="Writing vault file…")
 
@@ -1545,22 +1584,37 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
         console.print("[red]Vault file is corrupted or truncated.[/red]")
         return
 
-    # Prompt for passphrase
-    passphrase = Prompt.ask("Vault passphrase", password=True)
-    if not passphrase:
-        console.print("[red]Passphrase cannot be empty.[/red]")
-        return
-
-    # Decrypt
-    try:
-        key = _derive_vault_key(passphrase.encode(), salt)
-        plaintext = AESGCM(key).decrypt(nonce, ciphertext, None)
-    except cryptography.exceptions.InvalidTag:
-        _error("Wrong passphrase.", "The vault file is intact but the passphrase does not match.")
-        return
-    except Exception as e:
-        _error(f"Decryption failed: {e}", "The vault file may be corrupted.")
-        return
+    # Prompt for passphrase with rate limiting (3 attempts, exponential backoff)
+    max_attempts = 3
+    plaintext = None
+    for attempt in range(1, max_attempts + 1):
+        passphrase = Prompt.ask("Vault passphrase", password=True)
+        if not passphrase:
+            console.print("[red]Passphrase cannot be empty.[/red]")
+            return
+        try:
+            key = _derive_vault_key(passphrase.encode(), salt)
+            aad = VAULT_MAGIC + salt + nonce
+            plaintext = AESGCM(key).decrypt(nonce, ciphertext, aad)
+            break
+        except cryptography.exceptions.InvalidTag:
+            remaining = max_attempts - attempt
+            if remaining > 0:
+                delay = 3 ** (attempt - 1)  # 1s, 3s, 9s
+                console.print(
+                    f"[red]Wrong passphrase.[/red] "
+                    f"{remaining} attempt{'s' if remaining > 1 else ''} remaining."
+                )
+                time.sleep(delay)
+            else:
+                _error(
+                    "Wrong passphrase — 3 attempts exhausted.",
+                    "The vault file is intact. Try again later.",
+                )
+                return
+        except Exception as e:
+            _error(f"Decryption failed: {e}", "The vault file may be corrupted.")
+            return
 
     pass_dir = Path(CONFIG.get("pass_dir", Path.home() / ".password-store"))
 
@@ -1590,19 +1644,34 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
         progress.add_task("Restoring vault…", total=None)
         buf = io.BytesIO(plaintext)
         with tarfile.open(fileobj=buf, mode="r:gz") as tar:
-            # Validate all members to prevent path traversal attacks
+            # Validate all members to prevent path traversal and symlink attacks
             extract_root = pass_dir.parent.resolve()
             safe_members = []
             for member in tar.getmembers():
+                # Reject symlinks and hardlinks — they can redirect writes
+                # outside the extraction root even after path validation
+                if member.issym() or member.islnk():
+                    _error(
+                        f"Symlink/hardlink in vault: {member.name}",
+                        "This vault file may be malicious. Import aborted.",
+                    )
+                    return
+                # Reject absolute paths and null bytes
+                if member.name.startswith("/") or "\x00" in member.name:
+                    _error(
+                        f"Unsafe path in vault: {member.name!r}",
+                        "This vault file may be malicious. Import aborted.",
+                    )
+                    return
+                # Robust containment check — is_relative_to is not fooled
+                # by string prefix overlaps (e.g. .password-store2/)
                 target = (extract_root / member.name).resolve()
-                if not str(target).startswith(str(extract_root)):
+                if not target.is_relative_to(extract_root):
                     _error(
                         f"Path traversal detected in vault: {member.name}",
                         "This vault file may be malicious. Import aborted.",
                     )
                     return
-                if member.name.startswith("/") or "\x00" in member.name:
-                    continue  # skip absolute paths and null bytes
                 safe_members.append(member)
             tar.extractall(extract_root, members=safe_members)
 
@@ -1782,24 +1851,35 @@ class PassShell(cmd.Cmd):
         readline.set_history_length(500)
 
     def _acquire_lock(self) -> None:
-        """Create lock file to warn about concurrent access."""
-        if self._lock_path.exists():
-            console.print(
-                "[yellow]Warning: Another passclip session may be running.[/yellow]\n"
-                f"[dim]Lock file: {self._lock_path}[/dim]"
-            )
+        """Acquire an exclusive lock file using fcntl.flock (atomic, no race condition)."""
+        self._lock_fd = None
         try:
-            self._lock_path.write_text(str(os.getpid()))
+            fd = os.open(str(self._lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                console.print(
+                    "[yellow]Warning: Another passclip session is running.[/yellow]\n"
+                    f"[dim]Lock file: {self._lock_path}[/dim]"
+                )
+                return
+            # Write PID for informational purposes
+            os.ftruncate(fd, 0)
+            os.write(fd, str(os.getpid()).encode())
+            self._lock_fd = fd
         except OSError:
             pass
 
     def _release_lock(self) -> None:
-        """Remove lock file on exit."""
+        """Release the flock and remove lock file on exit."""
         try:
+            if self._lock_fd is not None:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+                os.close(self._lock_fd)
+                self._lock_fd = None
             if self._lock_path.exists():
-                # Only remove if we own it
-                if self._lock_path.read_text().strip() == str(os.getpid()):
-                    self._lock_path.unlink()
+                self._lock_path.unlink()
         except OSError:
             pass
 

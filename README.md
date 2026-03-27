@@ -4,7 +4,7 @@
 [![CI](https://github.com/rxb06/Passclip/actions/workflows/ci.yml/badge.svg)](https://github.com/rxb06/Passclip/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/rxb06/Passclip)](LICENSE)
 
-> **TL;DR:** A thin subprocess-isolated wrapper over `pass` + GPG for scriptable, CI-friendly secret access - structured parsing, TOTP, health auditing, AES-256-GCM vault backups, secure clipboard, fzf search, env-var injection, and CSV import from Bitwarden/LastPass/1Password.
+> **TL;DR:** A local-first CLI over `pass` + GPG — inject secrets into processes without shell history or disk writes, auto-clearing clipboard, built-in TOTP, health auditing, encrypted backups, and CSV import from Bitwarden/LastPass/1Password.
 
 
 `pass` handles encryption and git. Passclip handles everything around it.
@@ -81,13 +81,13 @@ But `pass` is intentionally minimal, and that minimalism has real gaps in daily 
 | Gap in `pass` | What Passclip does about it |
 |---|---|
 | No structured entries | First line is the password, everything else is `key: value` pairs. Compatible with `pass-import`. |
-| Clipboard is fire-and-forget | Auto-clear with a configurable timer. Checks clipboard before clearing. |
+| Clipboard `--clip` is inconsistent cross-platform | Reliable auto-clear with a configurable timer. Checks clipboard content before clearing. |
 | No strength feedback | Visual strength bar, entropy estimate, actionable tips. |
 | No health audit | `passclip health` scans every entry — flags weak passwords and duplicates. |
 | TOTP needs an extension | Built in. `passclip otp --add` to set up, `passclip gmail -o` to copy a code. |
 | Importing is painful | `passclip import file.csv` — auto-detects Bitwarden, LastPass, 1Password. |
 | No interactive shell | Full REPL with tab completion, history, and single-letter shortcuts (`c`, `u`, `o`). |
-| No GPG-independent backup | `export-vault` creates an AES-256-GCM encrypted file. Restore on any machine. |
+| No GPG-independent backup | `export-vault` creates an AES-256-GCM encrypted file. Restore on any machine with Python + `cryptography`. |
 | No secret injection for devs | `passclip run entry -- command` injects fields as env vars. |
 | Deletes are permanent | Pre-delete backups to `~/.config/passclip/backups/`. |
 | No entry validation | Blocks path traversal, shell metacharacters, and bad input. |
@@ -96,7 +96,40 @@ Your password store is still a directory of GPG files. `pass show`, `pass insert
 
 ---
 
+## How it compares
+
+| Capability | Passclip | pass | .env files |
+|---|---|---|---|
+| Runtime secret injection | ✅ | ❌ | ❌ |
+| Clipboard auto-clear | ✅ | ⚠️ `--clip` (inconsistent cross-platform) | ❌ |
+| Built-in TOTP | ✅ | ❌ (needs `pass-otp`) | ❌ |
+| CSV import (Bitwarden/LastPass/1P) | ✅ | ❌ (needs `pass-import`) | ❌ |
+| Password health audit | ✅ | ❌ | ❌ |
+| Encrypted backup (non-GPG) | ✅ | ❌ | ❌ |
+| Secrets encrypted at rest | ✅ (GPG) | ✅ (GPG) | ❌ (plaintext) |
+| No secrets in version control | ✅ | ✅ | ⚠️ (easy to commit accidentally — use [Credactor](https://github.com/rxb06/Credactor)) |
+
+Passclip is not:
+- A cloud password manager (no account, no sync server)
+- A replacement for pass/GPG storage (it uses pass under the hood for every read and write)
+- A secrets server like HashiCorp Vault (it's a local CLI tool)
+- Windows-compatible (`pass` and GPG tooling assume a Unix environment — macOS and Linux only)
+
+It is: a secure local interface for using secrets stored in pass.
+
+---
+
 ## What can it do?
+
+**Secure secret injection — the differentiator:**
+
+```bash
+passclip run aws/prod -- aws s3 ls    # inject secrets as env vars
+passclip run db/prod -- psql          # secrets never hit disk or shell history
+
+# verify: nothing leaks
+env | grep PASS_                      # empty after process exits
+```
 
 **Quick copy — the daily driver:**
 
@@ -125,10 +158,9 @@ passclip archive web/old-site         # stash it, don't delete it
 passclip export-vault ~/backup.vault  # AES-256 encrypted backup
 ```
 
-**Developer workflows:**
+**Migration:**
 
 ```bash
-passclip run aws/prod -- aws s3 ls    # inject secrets as env vars
 passclip import bitwarden_export.csv  # migrate from another manager
 passclip import export.csv --dry-run  # preview before committing
 ```
@@ -183,7 +215,7 @@ Passclip uses [Credactor](https://github.com/rxb06/Credactor) to scan for hardco
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/rxb06/Credactor
-    rev: v2.0.1
+    rev: v2.2.2
     hooks:
       - id: credactor
 ```
@@ -214,14 +246,22 @@ First line is always the password. Everything else is optional `key: value` meta
 
 ## Security
 
-- **No shell injection** — all subprocess calls use list arguments, never `shell=True`.
-- **Entry name validation** — blocks path traversal (`..`), shell metacharacters, and other tricks.
-- **Clipboard auto-clear** — passwords are wiped after a configurable timeout.
-- **Atomic vault writes** — no partial files on disk-full.
-- **Pre-delete backups** — saved to `~/.config/passclip/backups/` before deletion.
-- **AES-256-GCM vaults** — encrypted with PBKDF2-SHA256 at 600,000 iterations.
+**Properties:**
+- Secrets are not written to disk during normal operation (exception: pre-delete backups are plaintext — see below)
+- Never exposed in shell history — passed as env vars or clipboard, not CLI args
+- `run` injects secrets as env vars into child processes — they are visible in `/proc/<pid>/environ` on Linux for the lifetime of that process
+- Clipboard auto-clears after configurable timeout (constant-time comparison)
+- All subprocess calls use list arguments — no `shell=True` anywhere
+- Vault encryption authenticates header metadata (AAD) — tampering is detected
+- Tar extraction rejects symlinks, hardlinks, and path traversal
 
-Full policy: [SECURITY.md](SECURITY.md)
+**Controls:**
+- Entry name validation blocks `..`, shell metacharacters, control characters, and excessive depth
+- Atomic vault writes — no partial files on disk-full
+- Pre-delete backups saved to `~/.config/passclip/backups/` with `0600` permissions
+- AES-256-GCM with PBKDF2-SHA256 at 600,000 iterations
+
+Full threat model: [SECURITY.md](SECURITY.md)
 
 ---
 
