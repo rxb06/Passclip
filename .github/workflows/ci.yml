@@ -74,4 +74,4 @@ jobs:
       - name: Scan dependencies for known CVEs
         run: |
           pip install pip-audit
-          pip-audit -r requirements-ci.txt
+          pip-audit -r requirements-ci.txt --ignore-vuln CVE-2026-4539  # Pygments AdlLexer ReDoS — transitive dep, unreachable from Passclip
