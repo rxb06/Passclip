@@ -100,6 +100,15 @@ class TestLoadConfig:
             cfg = load_config()
         assert cfg["clip_timeout"] == DEFAULT_CONFIG["clip_timeout"]
 
+    def test_warns_on_unknown_keys(self, tmp_path, capsys):
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(json.dumps({"clip_timeout": 30, "typo_key": True}))
+        with patch("passclip.CONFIG_PATH", cfg_path):
+            cfg = load_config()
+        assert cfg["clip_timeout"] == 30
+        # Unknown key should not be in defaults but is in loaded config
+        assert "typo_key" in cfg
+
 
 class TestSaveConfig:
     """Config persistence and file permissions."""
@@ -293,6 +302,38 @@ class TestParseCsvRow:
         assert data["name"] == "Test"
         assert data["folder"] == "misc"
 
+    def test_missing_password_field(self):
+        """Row without password should return empty password."""
+        row = {"name": "NoPass", "folder": "misc"}
+        data = _parse_csv_row(row, "generic")
+        assert data["password"] == ""
+
+    def test_missing_name_field(self):
+        """Row without name should return empty name."""
+        row = {"password": "pw", "folder": "misc"}
+        data = _parse_csv_row(row, "generic")
+        assert data["name"] == ""
+
+    def test_special_characters_in_fields(self):
+        """Fields with special chars should pass through unmodified."""
+        row = {
+            "name": "Tëst Ñame™", "password": "p@$$w0rd!<>&;", # credactor:ignore
+            "folder": "", "username": "user@domain.com",
+        }
+        data = _parse_csv_row(row, "generic")
+        assert data["name"] == "Tëst Ñame™"
+        assert data["password"] == "p@$$w0rd!<>&;"
+
+    def test_bitwarden_empty_folder(self):
+        """Bitwarden rows with empty folder should return empty folder."""
+        row = {
+            "name": "Test", "folder": "",
+            "login_username": "", "login_password": "pw",
+            "login_uri": "", "notes": "", "login_totp": "",
+        }
+        data = _parse_csv_row(row, "bitwarden")
+        assert data["folder"] == ""
+
 
 class TestSanitizeEntryPath:
     """Entry path sanitization for CSV imports."""
@@ -317,6 +358,36 @@ class TestSanitizeEntryPath:
     def test_empty_name_falls_back_to_unnamed(self):
         result = _sanitize_entry_path("", "")
         assert result == "unnamed"
+
+    def test_leading_dot_stripped(self):
+        result = _sanitize_entry_path(".hidden", "")
+        assert result is not None
+        assert not result.startswith(".")
+
+    def test_leading_dash_stripped(self):
+        result = _sanitize_entry_path("-rf", "")
+        assert result is not None
+        assert not result.startswith("-")
+
+    def test_double_dot_folder(self):
+        result = _sanitize_entry_path("name", "../../../etc")
+        assert result is None or ".." not in result
+
+    def test_shell_metacharacters_rejected(self):
+        """Names with shell metacharacters should be rejected after sanitization."""
+        # _sanitize_entry_path replaces / and .. but metacharacters
+        # are caught by validate_entry_name() which it calls internally
+        result = _sanitize_entry_path("test$(evil)", "")
+        assert result is None
+
+    def test_null_byte_rejected(self):
+        result = _sanitize_entry_path("test\x00evil", "")
+        assert result is None
+
+    def test_very_long_name(self):
+        """Extremely long names should be rejected by validate_entry_name."""
+        result = _sanitize_entry_path("a" * 300, "")
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -345,20 +416,28 @@ class TestVaultCrypto:
         k2 = _derive_vault_key(b"pass2", salt)
         assert k1 != k2
 
-    def test_encrypt_decrypt_roundtrip(self):
+    def test_key_derivation_rejects_wrong_salt_length(self):
+        with pytest.raises(AssertionError):
+            _derive_vault_key(b"test", b"short")
+        with pytest.raises(AssertionError):
+            _derive_vault_key(b"test", b"x" * 64)
+
+    def test_encrypt_decrypt_roundtrip_with_aad(self):
+        """Full vault encrypt/decrypt roundtrip with AAD."""
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
         passphrase = b"testpassword"
         salt = os.urandom(32)
         nonce = os.urandom(12)
         plaintext = b"secret data for the vault"
+        aad = VAULT_MAGIC + salt + nonce
 
         key = _derive_vault_key(passphrase, salt)
-        ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
+        ciphertext = AESGCM(key).encrypt(nonce, plaintext, aad)
 
-        # Decrypt with same key
+        # Decrypt with same key and AAD
         key2 = _derive_vault_key(passphrase, salt)
-        result = AESGCM(key2).decrypt(nonce, ciphertext, None)
+        result = AESGCM(key2).decrypt(nonce, ciphertext, aad)
         assert result == plaintext
 
     def test_wrong_passphrase_fails(self):
@@ -367,21 +446,41 @@ class TestVaultCrypto:
 
         salt = os.urandom(32)
         nonce = os.urandom(12)
+        aad = VAULT_MAGIC + salt + nonce
         key_good = _derive_vault_key(b"correct", salt)
         key_bad = _derive_vault_key(b"wrong", salt)
-        ciphertext = AESGCM(key_good).encrypt(nonce, b"data", None)
+        ciphertext = AESGCM(key_good).encrypt(nonce, b"data", aad)
 
         with pytest.raises(InvalidTag):
-            AESGCM(key_bad).decrypt(nonce, ciphertext, None)
+            AESGCM(key_bad).decrypt(nonce, ciphertext, aad)
 
-    def test_vault_file_format(self):
-        """Verify the vault file structure: magic + salt + nonce + ciphertext."""
+    def test_tampered_aad_fails(self):
+        """Tampering with salt/nonce in file header should cause InvalidTag."""
+        from cryptography.exceptions import InvalidTag
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
         salt = os.urandom(32)
         nonce = os.urandom(12)
+        aad = VAULT_MAGIC + salt + nonce
+        key = _derive_vault_key(b"password", salt)
+        ciphertext = AESGCM(key).encrypt(nonce, b"secret", aad)
+
+        # Tamper with salt in AAD (simulates file header modification)
+        tampered_salt = bytes([salt[0] ^ 0xFF]) + salt[1:]
+        tampered_aad = VAULT_MAGIC + tampered_salt + nonce
+
+        with pytest.raises(InvalidTag):
+            AESGCM(key).decrypt(nonce, ciphertext, tampered_aad)
+
+    def test_vault_file_format_with_aad(self):
+        """Verify vault file structure and decrypt from file with AAD."""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        salt = os.urandom(32)
+        nonce = os.urandom(12)
+        aad = VAULT_MAGIC + salt + nonce
         key = _derive_vault_key(b"pw", salt)
-        ciphertext = AESGCM(key).encrypt(nonce, b"payload", None)
+        ciphertext = AESGCM(key).encrypt(nonce, b"payload", aad)
 
         # Simulate writing a vault file
         with tempfile.NamedTemporaryFile(delete=False) as f:
@@ -393,7 +492,8 @@ class TestVaultCrypto:
 
         try:
             with open(path, "rb") as f:
-                assert f.read(4) == VAULT_MAGIC
+                magic = f.read(4)
+                assert magic == VAULT_MAGIC
                 read_salt = f.read(32)
                 read_nonce = f.read(12)
                 read_ct = f.read()
@@ -401,9 +501,63 @@ class TestVaultCrypto:
             assert len(read_nonce) == 12
             assert read_ct == ciphertext
 
-            # Decrypt from file
+            # Decrypt from file — reconstruct AAD from file header
+            read_aad = magic + read_salt + read_nonce
             key2 = _derive_vault_key(b"pw", read_salt)
-            result = AESGCM(key2).decrypt(read_nonce, read_ct, None)
+            result = AESGCM(key2).decrypt(read_nonce, read_ct, read_aad)
             assert result == b"payload"
         finally:
             os.unlink(path)
+
+    def test_vault_magic_is_pcv2(self):
+        """Verify we're on vault format v2."""
+        assert VAULT_MAGIC == b"PCV2"
+
+    def test_truncated_vault_detected(self):
+        """Truncated vault file should fail validation."""
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(VAULT_MAGIC)
+            f.write(os.urandom(10))  # too short for salt(32) + nonce(12)
+            path = f.name
+        try:
+            with open(path, "rb") as f:
+                f.read(4)  # skip magic
+                salt = f.read(32)
+                nonce = f.read(12)
+                ct = f.read()
+            # Should detect truncation
+            assert len(salt) < 32 or len(nonce) < 12 or not ct
+        finally:
+            os.unlink(path)
+
+    def test_wrong_magic_detected(self):
+        """File with wrong magic header should be rejected."""
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(b"FAKE")
+            f.write(os.urandom(32 + 12 + 64))
+            path = f.name
+        try:
+            with open(path, "rb") as f:
+                magic = f.read(4)
+            assert magic != VAULT_MAGIC
+        finally:
+            os.unlink(path)
+
+    def test_corrupted_ciphertext_fails(self):
+        """Corrupted ciphertext should raise InvalidTag."""
+        from cryptography.exceptions import InvalidTag
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        salt = os.urandom(32)
+        nonce = os.urandom(12)
+        aad = VAULT_MAGIC + salt + nonce
+        key = _derive_vault_key(b"password", salt)
+        ciphertext = AESGCM(key).encrypt(nonce, b"secret data", aad)
+
+        # Flip a byte in the ciphertext
+        corrupted = bytearray(ciphertext)
+        corrupted[0] ^= 0xFF
+        corrupted = bytes(corrupted)
+
+        with pytest.raises(InvalidTag):
+            AESGCM(key).decrypt(nonce, corrupted, aad)

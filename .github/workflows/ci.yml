@@ -71,3 +71,7 @@ jobs:
           python -m build
       - name: Audit wheel for supply chain attacks
         run: python scripts/audit_wheel.py
+      - name: Scan dependencies for known CVEs
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements-ci.txt

@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 1.1.x | Yes |
-| 1.0.x | No |
+| 1.2.x | Yes |
+| < 1.2 | No |
 
 We only support the latest release. If you're running an older version, please update before reporting issues.
 
@@ -46,10 +46,14 @@ Passclip is a CLI built on top of [`pass`](https://www.passwordstore.org/), the 
 
 - **Input validation**: entry names are checked for path traversal (`..`), shell metacharacters, excessive depth, and other tricks before any write operation.
 - **Subprocess safety**: all calls to `pass`, `gpg`, `git`, and other tools use Python's `subprocess` module with list arguments. There is no `shell=True` anywhere in the codebase, which means no shell injection.
-- **Clipboard management**: passwords are auto-cleared from the clipboard after a configurable timeout (default 45s). Passclip checks clipboard content before clearing to avoid wiping something you copied after the password.
-- **Vault encryption**: the `export-vault` / `import-vault` feature uses AES-256-GCM with a key derived via PBKDF2-SHA256 at 600,000 iterations. Vault files are written atomically (temp file + rename) to prevent partial files.
+- **Clipboard management**: passwords are auto-cleared from the clipboard after a configurable timeout (default 45s). Passclip checks clipboard content before clearing (using constant-time comparison) to avoid wiping something you copied after the password. The clipboard clear helper uses no shell commands — all paths use Python subprocess with list arguments.
+- **Vault encryption**: the `export-vault` / `import-vault` feature uses AES-256-GCM with a key derived via PBKDF2-SHA256 at 600,000 iterations. The magic header, salt, and nonce are authenticated as additional associated data (AAD), so tampering with any part of the vault file is detected. Vault files are written atomically (temp file + rename) to prevent partial files.
+- **Vault import hardening**: tar extraction rejects symlinks, hardlinks, absolute paths, null bytes, and any member whose resolved path escapes the extraction root (checked via `Path.is_relative_to()`, not string prefix matching).
 - **File permissions**: config files, history files, vault exports, and pre-delete backups are all created with `0600` permissions (owner read/write only).
-- **Concurrent access**: the interactive shell uses a PID-based lock file to warn you if another instance is already running.
+- **Vault unlock rate limiting**: vault import allows a maximum of 3 passphrase attempts with exponential backoff (1s, 2s, 4s) to slow brute-force attacks against vault files.
+- **Input length limits**: entry fields (username, email, URL, notes) are capped at 64KB to prevent memory exhaustion from oversized input.
+- **OTP validation**: TOTP secrets are validated before storage — base32 decode is verified, minimum length enforced, and `otpauth://` URIs must contain a `secret=` parameter.
+- **Concurrent access**: the interactive shell uses `fcntl.flock()` to prevent concurrent instances from corrupting state.
 
 ### What GPG / pass handles
 
@@ -62,7 +66,7 @@ Passclip is a CLI built on top of [`pass`](https://www.passwordstore.org/), the 
 - **GPG agent security**: if your GPG agent is configured to cache passphrases, decrypted material stays in agent memory for the cache duration. This is a GPG setting, not a Passclip setting.
 - **System clipboard**: once a password is on the clipboard, any application on your system can read it until it's cleared. The auto-clear timer helps, but there's a window of exposure.
 - **Terminal scrollback**: if you display a password in the terminal (`passclip get`), it may be visible in your terminal's scrollback buffer. Consider using `--clip` instead.
-- **Memory**: Python doesn't provide guaranteed memory zeroing. Decrypted passwords exist in Python process memory briefly during display or clipboard operations. This is a known limitation of high-level languages.
+- **Memory**: Python doesn't provide guaranteed memory zeroing. Decrypted passwords and vault passphrases remain in process heap memory until the garbage collector frees the objects and the OS reuses those pages — they are not overwritten with zeros. This means secrets can be recovered from process memory dumps, core dumps, or swap/hibernation files by an attacker with local access. This is a known limitation of all high-level garbage-collected languages. The same applies to GPG agent and most password managers not written in C/Rust with explicit `mlock()` + secure zeroing.
 
 ---
 

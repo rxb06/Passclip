@@ -6,6 +6,51 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ---
 
+## [1.2.0] — 2026-03-27
+
+### Fixed
+
+- **Vault import path traversal** — replaced `str.startswith()` containment check with `Path.is_relative_to()`, which is not fooled by sibling directories sharing a string prefix (e.g. `.password-store2/`).
+- **Vault import symlink/hardlink traversal** — tar members with symlinks or hardlinks are now rejected outright. Previously they could redirect file writes outside the extraction root.
+- **Vault import silent skip** — absolute paths and null bytes in tar members now abort the entire import with an error instead of being silently skipped.
+- **Clipboard timing side-channel** — replaced `pyperclip.paste() == t` with `hmac.compare_digest()` for constant-time comparison in the clipboard clear helper.
+- **Vault passphrase confirm timing** — replaced `!=` with `hmac.compare_digest()` for constant-time comparison.
+- **OTP save failure silent** — first code generation failure after `cmd_otp_add()` now logs the error instead of silently catching it.
+- **OTP display for 8-digit codes** — split at midpoint instead of hardcoded `[:3]`/`[3:]`.
+- **Shell lock file race condition** — replaced non-atomic `write_text(pid)` with `fcntl.flock()`.
+- **Bare exception swallowing** — narrowed 6 `except Exception: pass` blocks to specific types (`FileNotFoundError`, `OSError`, `ValueError`, etc.).
+
+### Changed
+
+- **Vault format bumped PCV1 → PCV2** — vault encryption now authenticates `VAULT_MAGIC + salt + nonce` as AAD. Tampering with the vault header triggers `InvalidTag` instead of a misleading "wrong passphrase" error. **Breaking:** vaults exported before this version must be re-exported.
+- **Native clipboard clear no longer uses bash** — the fallback clear path (`pbcopy`/`xclip`/`wl-copy`) now uses a Python one-liner subprocess instead of `bash -c` with format strings.
+- **Magic numbers replaced with named constants** — `PBKDF2_ITERATIONS` (600,000), `MAX_ENTRY_NAME_LEN` (200), `MAX_PATH_DEPTH` (10), `MAX_FIELD_LENGTH` (65,536).
+- **`_insert_entry()` helper** — consolidated 3 identical `Popen(["pass", "insert", "-m", "-f", ...])` blocks into a single function.
+- All GitHub Actions pinned to commit SHAs (checkout, setup-python, codeql-action).
+- CI dependencies installed via `--require-hashes` from a locked `requirements-ci.txt`.
+- Credactor credential scan now uploads SARIF to GitHub Security tab.
+- Credactor pre-commit hook bumped to v2.2.2.
+- README restructured: leads with secret injection differentiator, cross-tool comparison table (vs pass, .env), inline security properties, "Passclip is not" positioning block, Windows not supported documented.
+- SECURITY.md expanded: documents constant-time clipboard comparison, vault AAD, tar extraction hardening, and Python memory zeroing limitation in detail.
+- AI development disclosure moved from README to CONTRIBUTING.md.
+
+### Added
+
+- **Vault unlock rate limiting** — 3 attempts with exponential backoff (1s, 3s, 9s), then abort.
+- **Entry field length limits** — fields capped at 64KB to prevent OOM from pasted data.
+- **Stricter OTP validation** — base32 decode check, minimum 16 characters, `otpauth://` URI must contain `secret=` parameter.
+- **Unknown config key warnings** — typos in `config.json` now produce a visible warning instead of being silently ignored.
+- **Salt length assertion** — `_derive_vault_key()` asserts salt is exactly 32 bytes.
+- **`pip-audit` CVE scanning** in CI pipeline.
+- `scripts/audit_wheel.py` — verifies wheel contents match git-tracked source before publish.
+- `build-audit` CI job — builds wheel and runs audit on every PR.
+- `requirements-ci.in` / `requirements-ci.txt` — hash-locked CI dependency lockfile.
+- `.github/CODEOWNERS` — protects workflows, scripts, `pyproject.toml`, and requirements.
+- Sigstore attestations enabled in publish workflow.
+- 20+ new tests: vault round-trip with AAD, salt length rejection, unknown config keys, CSV edge cases (missing fields, special characters, empty folder, duplicates), `_sanitize_entry_path` (leading dot/dash, double-dot, shell metacharacters, null byte, long names).
+
+---
+
 ## [1.1.3] — 2026-03-22
 
 ### Fixed
