@@ -6,6 +6,29 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ---
 
+## [1.2.1] — 2026-04-09
+
+### Fixed
+
+- **Symlink containment in vault export** — `cmd_export_vault()` now skips symlinks and any path whose resolved location escapes the password store root. Previously `rglob()` followed directory symlinks, which could include arbitrary files in an encrypted vault if a symlink was planted in the store (e.g. via a compromised git remote).
+- **Symlink containment in entry listing** — `get_all_entries()` applies the same symlink + containment check. Symlinked entries or entries under symlinked directories no longer appear in listings, tab completion, health scans, or fuzzy search.
+- **tar extraction filter** — `import-vault` now passes `filter='data'` to `tar.extractall()` on Python 3.12+ (version-guarded), stripping setuid bits and device nodes from extracted members. Manual member validation (symlink rejection, path traversal check) was already in place; this adds a defense-in-depth layer.
+- **Atomic backup file write** — `_backup_entry()` now uses `os.open(O_CREAT|O_TRUNC, 0o600)` + `os.fdopen()` instead of `touch(mode=0o600)` + `write_text()`. Eliminates the TOCTOU window between file creation and write, consistent with `save_config()`.
+- **SECURITY.md backoff values** — documented delays corrected from `(1s, 2s, 4s)` to `(1s, 3s)` to match the `3 ** (attempt - 1)` formula in code.
+- **CVE-2026-39892 (cryptography)** — bumped `cryptography` from 46.0.6 to 46.0.7 in CI lockfile (`requirements-ci.txt`). Runtime dependency in `pyproject.toml` already specifies `>=41.0`; users will receive the fix on their next install.
+
+### Changed
+
+- **CODEOWNERS expanded** — `passclip.py`, `tests/`, `SECURITY.md`, and `.pre-commit-config.yaml` now require review, closing gaps that left the main module and test suite unprotected.
+- **credactor hash-locked in CI** — `pip install credactor` replaced with `--require-hashes -r requirements-ci.txt`; credactor added to `requirements-ci.in` with SHA-256 hash. `pip-audit` version-pinned to `2.10.0`.
+- **SECURITY.md** — documents symlink containment for vault export and entry listing.
+
+### Tests
+
+- 3 new tests for symlink exclusion in `get_all_entries()`: symlinked file excluded, symlinked directory excluded, real entries unaffected (79 total, up from 76).
+
+---
+
 ## [1.2.0] — 2026-03-27
 
 ### Fixed

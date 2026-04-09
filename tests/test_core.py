@@ -16,6 +16,7 @@ from passclip import (
     _sanitize_entry_path,
     format_entry,
     generate_password,
+    get_all_entries,
     load_config,
     parse_entry,
     password_strength,
@@ -561,3 +562,58 @@ class TestVaultCrypto:
 
         with pytest.raises(InvalidTag):
             AESGCM(key).decrypt(nonce, corrupted, aad)
+
+
+# ---------------------------------------------------------------------------
+# Symlink exclusion in get_all_entries (A-1 audit finding)
+# ---------------------------------------------------------------------------
+
+
+class TestSymlinkExclusion:
+    """Verify that get_all_entries() skips symlinks and paths escaping the store."""
+
+    def test_symlink_file_excluded(self, tmp_path):
+        """A symlinked .gpg file inside the store should be excluded."""
+        store = tmp_path / ".password-store"
+        store.mkdir()
+        # Real entry
+        (store / "real.gpg").write_text("password")
+        # Symlink entry pointing outside the store
+        outside = tmp_path / "outside.gpg"
+        outside.write_text("secret")
+        (store / "link.gpg").symlink_to(outside)
+
+        with patch("passclip.CONFIG", {"pass_dir": str(store)}):
+            entries = get_all_entries()
+        assert "real" in entries
+        assert "link" not in entries
+
+    def test_symlink_directory_excluded(self, tmp_path):
+        """Entries under a symlinked directory should be excluded."""
+        store = tmp_path / ".password-store"
+        store.mkdir()
+        (store / "real.gpg").write_text("password")
+        # External directory with a .gpg file
+        ext_dir = tmp_path / "external"
+        ext_dir.mkdir()
+        (ext_dir / "stolen.gpg").write_text("secret")
+        # Symlink directory inside the store
+        (store / "linked-dir").symlink_to(ext_dir)
+
+        with patch("passclip.CONFIG", {"pass_dir": str(store)}):
+            entries = get_all_entries()
+        assert "real" in entries
+        assert "linked-dir/stolen" not in entries
+
+    def test_real_entries_not_affected(self, tmp_path):
+        """Real (non-symlink) entries in subdirectories should still work."""
+        store = tmp_path / ".password-store"
+        sub = store / "email"
+        sub.mkdir(parents=True)
+        (sub / "work.gpg").write_text("password")
+        (store / "bank.gpg").write_text("password2")
+
+        with patch("passclip.CONFIG", {"pass_dir": str(store)}):
+            entries = get_all_entries()
+        assert "email/work" in entries
+        assert "bank" in entries

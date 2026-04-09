@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "passclip"
-version = "1.2.0"
+version = "1.2.1"
 description = "Security-focused CLI for managing secrets in GPG-backed environments. Extends pass with TOTP, AES-256-GCM backups, secure clipboard handling, and runtime secret injection."
 readme = "README.md"
 license = "GPL-3.0-only"

@@ -11,3 +11,4 @@ pyperclip>=1.8
 pyotp>=2.8
 tomli>=1.1.0
 exceptiongroup>=1.0
+credactor>=2.3
