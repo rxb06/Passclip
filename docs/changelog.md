@@ -15,6 +15,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 - **tar extraction filter** — `import-vault` now passes `filter='data'` to `tar.extractall()` on Python 3.12+ (version-guarded), stripping setuid bits and device nodes from extracted members. Manual member validation (symlink rejection, path traversal check) was already in place; this adds a defense-in-depth layer.
 - **Atomic backup file write** — `_backup_entry()` now uses `os.open(O_CREAT|O_TRUNC, 0o600)` + `os.fdopen()` instead of `touch(mode=0o600)` + `write_text()`. Eliminates the TOCTOU window between file creation and write, consistent with `save_config()`.
 - **SECURITY.md backoff values** — documented delays corrected from `(1s, 2s, 4s)` to `(1s, 3s)` to match the `3 ** (attempt - 1)` formula in code.
+- **CVE-2026-39892 (cryptography)** — bumped `cryptography` from 46.0.6 to 46.0.7 in CI lockfile (`requirements-ci.txt`). Runtime dependency in `pyproject.toml` already specifies `>=41.0`; users will receive the fix on their next install.
 
 ### Changed
 
