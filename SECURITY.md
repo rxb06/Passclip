@@ -50,7 +50,7 @@ Passclip is a CLI built on top of [`pass`](https://www.passwordstore.org/), the 
 - **Vault encryption**: the `export-vault` / `import-vault` feature uses AES-256-GCM with a key derived via PBKDF2-SHA256 at 600,000 iterations. The magic header, salt, and nonce are authenticated as additional associated data (AAD), so tampering with any part of the vault file is detected. Vault files are written atomically (temp file + rename) to prevent partial files.
 - **Vault import hardening**: tar extraction rejects symlinks, hardlinks, absolute paths, null bytes, and any member whose resolved path escapes the extraction root (checked via `Path.is_relative_to()`, not string prefix matching).
 - **File permissions**: config files, history files, vault exports, and pre-delete backups are all created with `0600` permissions (owner read/write only).
-- **Vault unlock rate limiting**: vault import allows a maximum of 3 passphrase attempts with exponential backoff (1s, 2s, 4s) to slow brute-force attacks against vault files.
+- **Vault unlock rate limiting**: vault import allows a maximum of 3 passphrase attempts with exponential backoff (1s, 3s) to slow brute-force attacks against vault files.
 - **Input length limits**: entry fields (username, email, URL, notes) are capped at 64KB to prevent memory exhaustion from oversized input.
 - **OTP validation**: TOTP secrets are validated before storage — base32 decode is verified, minimum length enforced, and `otpauth://` URIs must contain a `secret=` parameter.
 - **Concurrent access**: the interactive shell uses `fcntl.flock()` to prevent concurrent instances from corrupting state.

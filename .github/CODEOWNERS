@@ -1,4 +1,8 @@
+passclip.py            @rxb06
+tests/                 @rxb06
 scripts/               @rxb06
 .github/workflows/     @rxb06
+.pre-commit-config.yaml @rxb06
 pyproject.toml         @rxb06
 requirements-ci.*      @rxb06
+SECURITY.md            @rxb06

@@ -236,7 +236,11 @@ def get_all_entries() -> List[str]:
         console.print("[dim]Run 'wizard' to set up, or 'config pass_dir /path/to/store'[/dim]")
         return []
     entries = []
+    resolved_root = pass_dir.resolve()
     for f in pass_dir.rglob("*.gpg"):
+        # Skip symlinks and paths that escape the store (via directory symlinks)
+        if f.is_symlink() or not f.resolve().is_relative_to(resolved_root):
+            continue
         rel = f.relative_to(pass_dir)
         entry = str(rel)
         if entry.endswith(".gpg"):
@@ -1285,8 +1289,9 @@ def _backup_entry(entry: str) -> Optional[Path]:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe = entry.replace("/", "_")
         backup = backup_dir / f"{safe}_{ts}.bak"
-        backup.touch(mode=0o600, exist_ok=True)
-        backup.write_text(content)
+        fd = os.open(str(backup), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
         return backup
     return None
 
@@ -1505,11 +1510,16 @@ def cmd_export_vault(output_path: str) -> None:
 
         # Build in-memory tar.gz, skipping .git/
         buf = io.BytesIO()
+        resolved_root = pass_dir.resolve()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
             for item in pass_dir.rglob("*"):
                 # Skip the .git directory and everything inside it
                 rel = item.relative_to(pass_dir)
                 if rel.parts and rel.parts[0] == ".git":
+                    continue
+                # Skip symlinks and paths that escape the store
+                if item.is_symlink() or not item.resolve().is_relative_to(resolved_root):
+                    console.print(f"[yellow]Skipping symlink: {rel}[/yellow]")
                     continue
                 arcname = Path(".password-store") / rel
                 tar.add(str(item), arcname=str(arcname), recursive=False)
@@ -1673,7 +1683,10 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
                     )
                     return
                 safe_members.append(member)
-            tar.extractall(extract_root, members=safe_members)
+            if sys.version_info >= (3, 12):
+                tar.extractall(extract_root, members=safe_members, filter="data")
+            else:
+                tar.extractall(extract_root, members=safe_members)
 
     restored = len(list(pass_dir.rglob("*.gpg")))
     console.print(Panel(
