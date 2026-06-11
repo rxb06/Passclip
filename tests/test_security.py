@@ -34,6 +34,7 @@ class TestOtpPromptsHidden:
         answers = ["Str0ngPass!x", "", "", "", "", ""]  # pw, user, email, url, notes, otp
         with patch("passclip.Prompt.ask", side_effect=answers) as ask, \
                 patch.dict("passclip.DEPS", {"pyotp": True}), \
+                patch("passclip.get_all_entries", return_value=[]), \
                 patch("passclip._insert_entry", return_value=(True, "")):
             cmd_insert("web/test")
         otp_calls = [c for c in ask.call_args_list if "OTP secret" in str(c.args[0])]
@@ -57,6 +58,7 @@ class TestOtpPromptsHidden:
         answers = ["Str0ngPass!x", "alice", "", "", "", ""]
         with patch("passclip.Prompt.ask", side_effect=answers), \
                 patch.dict("passclip.DEPS", {"pyotp": True}), \
+                patch("passclip.get_all_entries", return_value=[]), \
                 patch("passclip._insert_entry", return_value=(True, "")), \
                 patch("passclip.readline.set_auto_history") as sah:
             cmd_insert("web/test")
