@@ -6,9 +6,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ---
 
-## [1.4.0] — 2026-06-11
+## [1.3.0] — 2026-06-11
 
-The remediation release: every finding from the June 2026 security review and code-quality review, fixed across nine phases. **Support for all versions before 1.4 ends with this release** — upgrade unconditionally.
+The remediation release: every finding from the June 2026 security review and code-quality review, fixed across nine phases. **Support for all versions before 1.3 ends with this release** — upgrade unconditionally.
 
 ### Dependencies and Python support
 
