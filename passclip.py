@@ -929,7 +929,7 @@ def cmd_otp(entry: Optional[str] = None) -> None:
     if not secret:
         console.print(f"[red]No OTP secret in '{entry}'.[/red]")
         console.print(
-            "[dim]Run [bold]passclip otp --add {entry}[/bold] to set one up.[/dim]"
+            f"[dim]Run [bold]passclip otp --add {entry}[/bold] to set one up.[/dim]"
         )
         return
 
@@ -1145,7 +1145,7 @@ def cmd_git_log(n: int = 10) -> None:
 
 def _parse_csv_row(row: Dict[str, str], fmt: str) -> Dict[str, str]:
     """Extract fields from a CSV row based on format. Returns dict with name, folder, etc."""
-    row = {k.lower().strip(): v.strip() for k, v in row.items() if k}
+    row = {k.lower().strip(): (v or "").strip() for k, v in row.items() if k}
     if fmt == "bitwarden":
         return {
             "name": row.get("name", ""), "folder": row.get("folder", ""),
@@ -1225,7 +1225,7 @@ def cmd_import(filepath: str, fmt: str = "auto", dry_run: bool = False) -> None:
         console.print(f"[bold]Importing[/bold] {filepath} [dim](format: {fmt})[/dim]")
 
     imported = skipped = invalid = 0
-    existing = set(get_all_entries()) if not dry_run else set()
+    existing = set(get_all_entries())
 
     try:
         with open(path, newline="", encoding="utf-8-sig") as f:
@@ -1583,7 +1583,8 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
         if magic != VAULT_MAGIC:
             console.print(
                 "[red]Not a valid Passclip vault file.[/red]\n"
-                "[dim]Expected magic header 'PCV1'.[/dim]"
+                f"[dim]Expected magic header '{VAULT_MAGIC.decode()}'. Vaults exported "
+                "before v1.2 (PCV1) must be re-exported with the current version.[/dim]"
             )
             return
         salt = f.read(32)
@@ -1610,7 +1611,7 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
         except cryptography.exceptions.InvalidTag:
             remaining = max_attempts - attempt
             if remaining > 0:
-                delay = 3 ** (attempt - 1)  # 1s, 3s, 9s
+                delay = 3 ** (attempt - 1)  # 1s, 3s (no sleep after the final attempt)
                 console.print(
                     f"[red]Wrong passphrase.[/red] "
                     f"{remaining} attempt{'s' if remaining > 1 else ''} remaining."
@@ -1619,7 +1620,7 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
             else:
                 _error(
                     "Wrong passphrase — 3 attempts exhausted.",
-                    "The vault file is intact. Try again later.",
+                    "Wrong passphrase, or the vault file is corrupted. Try again later.",
                 )
                 return
         except Exception as e:

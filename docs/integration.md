@@ -80,6 +80,8 @@ This fails the build if any hardcoded credentials are found. Use `--format sarif
 
 Tab completion makes Passclip much faster when you have dozens of entries.
 
+The completion scripts live in the repo's [`completions/`](https://github.com/rxb06/Passclip/tree/main/completions) directory — they are **not** included in the pip package. If you installed via pip, download them from GitHub (or clone the repo) first.
+
 ### Bash
 
 Add to `~/.bashrc`:
@@ -143,7 +145,7 @@ pip install passclip[clipboard]
 pip install passclip[otp]
 
 # Everything
-pip install passclip[all]
+pip install "passclip[all]"
 ```
 
 ### System requirements

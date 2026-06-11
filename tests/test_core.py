@@ -109,6 +109,8 @@ class TestLoadConfig:
         assert cfg["clip_timeout"] == 30
         # Unknown key should not be in defaults but is in loaded config
         assert "typo_key" in cfg
+        out = capsys.readouterr().out
+        assert "unrecognized config key 'typo_key'" in out
 
 
 class TestSaveConfig:

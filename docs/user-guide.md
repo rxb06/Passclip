@@ -370,7 +370,7 @@ Your password store is already encrypted per-entry by GPG. But it's spread acros
 ```
 Offset   Size    Field
 ------   ----    -----
-0        4       Magic bytes: "PCV1"
+0        4       Magic bytes: "PCV2"
 4        32      Salt  (random, for key derivation)
 36       12      Nonce (random, for AES-256-GCM)
 48       N+16    Ciphertext + 16-byte GCM authentication tag
@@ -551,7 +551,7 @@ Passclip is your local source of truth. CI systems have their own secret stores 
 ### Fresh start (no existing passwords)
 
 ```bash
-pip install passclip[all]
+pip install "passclip[all]"
 passclip wizard
 ```
 
@@ -563,7 +563,7 @@ The wizard generates a GPG key, initializes the store, and sets up git. Done.
 
 ```bash
 git clone git@github.com:you/your-pass-store.git ~/.password-store
-pip install passclip[all]
+pip install "passclip[all]"
 passclip ls    # verify it works
 ```
 
@@ -582,7 +582,7 @@ rm private.key
 **Option B — Vault restore** (if you have an encrypted backup):
 
 ```bash
-pip install passclip[all]
+pip install "passclip[all]"
 passclip wizard               # set up GPG and empty store
 passclip import-vault ~/backup.vault     # restore everything
 ```
