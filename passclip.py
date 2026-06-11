@@ -1947,8 +1947,14 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
         progress.add_task("Restoring vault…", total=None)
         buf = io.BytesIO(plaintext)
         with tarfile.open(fileobj=buf, mode="r:gz") as tar:
-            # Validate all members to prevent path traversal and symlink attacks
+            # Validate all members to prevent path traversal and symlink attacks.
+            # Archive members are named '<store-dir>/...', so extraction writes
+            # into pass_dir.parent — but containment must be checked against the
+            # store itself (store_root), not its parent. Otherwise a member like
+            # '.bashrc' lands elsewhere under the parent (the home directory for
+            # the default store), an arbitrary-write primitive.
             extract_root = pass_dir.parent.resolve()
+            store_root = pass_dir.resolve()
             safe_members = []
             for member in tar.getmembers():
                 # Reject symlinks and hardlinks — they can redirect writes
@@ -1980,11 +1986,12 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
                 parts = Path(member.name).parts
                 if parts and parts[0] == ".password-store":
                     member.name = str(Path(pass_dir.name, *parts[1:]))
-                # Robust containment check on the actual extraction target —
-                # is_relative_to is not fooled by string prefix overlaps
-                # (e.g. .password-store2/)
+                # Robust containment check on the actual extraction target: it
+                # must stay inside the password store, not merely under its
+                # parent. is_relative_to is not fooled by string prefix overlaps
+                # (e.g. .password-store2/).
                 target = (extract_root / member.name).resolve()
-                if not target.is_relative_to(extract_root):
+                if not target.is_relative_to(store_root):
                     _error(
                         f"Path traversal detected in vault: {escape(member.name)}",
                         "This vault file may be malicious. Import aborted.",
@@ -2171,7 +2178,12 @@ class PassShell(cmd.Cmd):
         super().__init__()
         self._setup_history()
         pass_dir = CONFIG.get("pass_dir", Path.home() / ".password-store")
-        self._lock_path = Path(pass_dir) / ".passclip.lock"
+        # The lock lives in the 0700 config dir, NOT inside the git-synced
+        # store: a compromised remote could otherwise plant a '.passclip.lock'
+        # symlink in the store and redirect the lock's write to an arbitrary
+        # file. Name it per-store so sessions on different stores don't collide.
+        store_id = hashlib.sha256(str(Path(pass_dir).resolve()).encode()).hexdigest()[:16]
+        self._lock_path = Path.home() / ".config" / "passclip" / f".lock-{store_id}"
         self._acquire_lock()
 
     def _setup_history(self) -> None:
@@ -2206,7 +2218,15 @@ class PassShell(cmd.Cmd):
         """Acquire an exclusive lock file using fcntl.flock (atomic, no race condition)."""
         self._lock_fd = None
         try:
-            fd = os.open(str(self._lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(self._lock_path.parent, 0o700)
+            # O_NOFOLLOW: never follow a symlink at the lock path — defense in
+            # depth on top of keeping the lock out of the synced store.
+            fd = os.open(
+                str(self._lock_path),
+                os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW,
+                0o600,
+            )
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:

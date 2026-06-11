@@ -19,6 +19,13 @@ The remediation release: every finding from the June 2026 security review and co
 - **`otp` hint printed a literal `{entry}`** (missing f-string prefix).
 - **Passwords with leading/trailing whitespace were corrupted on read** — `pass show` output was blanket-stripped; now only the trailing newline is removed.
 
+### Fixed — security (High severity)
+
+A follow-up Critical/High audit (the deeper import/containment pass the original review left open) found two High-severity issues in the vault import and lock-file paths; both are fixed here, with zero Critical found:
+
+- **Malicious vault import confined to the store** — tar extraction was bounded to the store's *parent* directory, so a crafted vault member named e.g. `.bashrc` could be written anywhere under the home directory (arbitrary file write leading to code execution at next shell, or GPG/`.gpg-id` subversion). Containment is now checked against the password store itself; out-of-store members are refused.
+- **Shell lock no longer follows a planted symlink** — the lock file lived inside the git-synced store and was opened without `O_NOFOLLOW`, so a compromised remote could plant a `.passclip.lock` symlink and have the next shell launch truncate an arbitrary user-writable file (`~/.bashrc`, `~/.ssh/authorized_keys`). The lock now lives in the `0700` config directory (unreachable by a remote) and is opened with `O_NOFOLLOW`.
+
 ### Fixed — security (defense in depth)
 
 - **TOTP seeds and entry metadata no longer persist to readline history** — OTP prompts are hidden (getpass bypasses readline) and the insert flow's metadata prompts are excluded from history.

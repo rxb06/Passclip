@@ -220,7 +220,8 @@ def test_non_holder_release_keeps_lock(shell_env):
         intruder = PassShell()  # lock already held
     assert holder._lock_fd is not None
     assert intruder._lock_fd is None
-    lock = shell_env / ".passclip.lock"
+    lock = holder._lock_path  # now in the 0700 config dir, not the synced store
+    assert lock.exists()
     intruder._release_lock()
     assert lock.exists(), "non-holder must not delete the holder's lock file"
     holder._release_lock()
