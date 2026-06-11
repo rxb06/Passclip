@@ -17,14 +17,16 @@ class TestCmdImport:
     BITWARDEN_CSV = (
         "folder,favorite,type,name,notes,fields,login_uri,login_username,"
         "login_password,login_totp\n"
-        'email,,login,Gmail,work account,,https://gmail.com,alice@gmail.com,'
+        "email,,login,Gmail,work account,,https://gmail.com,alice@gmail.com,"
         "hunter2,JBSWY3DPEHPK3PXP\n"
     )
 
     def test_bitwarden_auto_detect_and_insert(self, tmp_path, capsys):
         path = _write_csv(tmp_path, "export.csv", self.BITWARDEN_CSV)
-        with patch("passclip._insert_entry", return_value=(True, "")) as ins, \
-                patch("passclip.get_all_entries", return_value=[]):
+        with (
+            patch("passclip._insert_entry", return_value=(True, "")) as ins,
+            patch("passclip.get_all_entries", return_value=[]),
+        ):
             cmd_import(path, "auto")
         assert ins.call_count == 1
         entry_path, content = ins.call_args[0]
@@ -43,8 +45,10 @@ class TestCmdImport:
             "Good,misc,bob,secret123,,\n"
         )
         path = _write_csv(tmp_path, "generic.csv", csv_content)
-        with patch("passclip._insert_entry", return_value=(True, "")) as ins, \
-                patch("passclip.get_all_entries", return_value=[]):
+        with (
+            patch("passclip._insert_entry", return_value=(True, "")) as ins,
+            patch("passclip.get_all_entries", return_value=[]),
+        ):
             cmd_import(path, "generic")
         # The broken row is skipped (no password); the good row still imports.
         assert ins.call_count == 1
@@ -55,8 +59,10 @@ class TestCmdImport:
     def test_dry_run_marks_existing_entries(self, tmp_path, capsys):
         """--dry-run must flag entries that already exist in the store."""
         path = _write_csv(tmp_path, "export.csv", self.BITWARDEN_CSV)
-        with patch("passclip._insert_entry", return_value=(True, "")) as ins, \
-                patch("passclip.get_all_entries", return_value=["email/gmail"]):
+        with (
+            patch("passclip._insert_entry", return_value=(True, "")) as ins,
+            patch("passclip.get_all_entries", return_value=["email/gmail"]),
+        ):
             cmd_import(path, "auto", dry_run=True)
         ins.assert_not_called()  # dry run never writes
         out = capsys.readouterr().out
@@ -65,8 +71,10 @@ class TestCmdImport:
 
     def test_dry_run_new_entry_not_marked(self, tmp_path, capsys):
         path = _write_csv(tmp_path, "export.csv", self.BITWARDEN_CSV)
-        with patch("passclip._insert_entry", return_value=(True, "")), \
-                patch("passclip.get_all_entries", return_value=["other/entry"]):
+        with (
+            patch("passclip._insert_entry", return_value=(True, "")),
+            patch("passclip.get_all_entries", return_value=["other/entry"]),
+        ):
             cmd_import(path, "auto", dry_run=True)
         out = capsys.readouterr().out
         assert "(exists)" not in out

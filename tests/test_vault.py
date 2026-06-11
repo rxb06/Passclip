@@ -43,14 +43,18 @@ def _file_member(name, data=b"x", mode=0o644):
 
 
 def _export(store, out_file):
-    with patch.dict("passclip.CONFIG", {"pass_dir": str(store)}), \
-            patch("passclip.Prompt.ask", side_effect=[PASSPHRASE, PASSPHRASE]):
+    with (
+        patch.dict("passclip.CONFIG", {"pass_dir": str(store)}),
+        patch("passclip.Prompt.ask", side_effect=[PASSPHRASE, PASSPHRASE]),
+    ):
         cmd_export_vault(str(out_file))
 
 
 def _import(store, vault_file):
-    with patch.dict("passclip.CONFIG", {"pass_dir": str(store)}), \
-            patch("passclip.Prompt.ask", side_effect=[PASSPHRASE]):
+    with (
+        patch.dict("passclip.CONFIG", {"pass_dir": str(store)}),
+        patch("passclip.Prompt.ask", side_effect=[PASSPHRASE]),
+    ):
         cmd_import_vault(str(vault_file), force=True)
 
 
@@ -83,18 +87,19 @@ class TestVaultRoundtrip:
         dest = tmp_path / "b" / "mystore"
         dest.parent.mkdir()
         _import(dest, vault)
-        assert (dest / "bank.gpg").read_bytes() == b"cipher-bank", \
+        assert (dest / "bank.gpg").read_bytes() == b"cipher-bank", (
             "restore must populate the configured pass_dir"
-        assert not (tmp_path / "b" / ".password-store").exists(), \
+        )
+        assert not (tmp_path / "b" / ".password-store").exists(), (
             "restore must not create a parallel .password-store"
+        )
 
 
 class TestMaliciousVault:
     """Crafted vaults must abort cleanly without extracting anything."""
 
     def test_path_traversal_member_aborts(self, tmp_path, capsys):
-        vault = _make_vault(tmp_path / "evil.vault", PASSPHRASE,
-                            [_file_member("../../evil.txt")])
+        vault = _make_vault(tmp_path / "evil.vault", PASSPHRASE, [_file_member("../../evil.txt")])
         store = tmp_path / "deep" / "store"
         store.parent.mkdir()
         _import(store, vault)
@@ -113,7 +118,8 @@ class TestMaliciousVault:
 
     def test_setuid_and_world_writable_modes_clamped(self, tmp_path):
         vault = _make_vault(
-            tmp_path / "modes.vault", PASSPHRASE,
+            tmp_path / "modes.vault",
+            PASSPHRASE,
             [_file_member(".password-store/sticky.gpg", b"x", mode=0o4777)],
         )
         store = tmp_path / "b" / ".password-store"
@@ -134,8 +140,10 @@ class TestVaultPassphraseQuality:
         store.mkdir()
         (store / "a.gpg").write_bytes(b"x")
         out_file = tmp_path / "backup.vault"
-        with patch.dict("passclip.CONFIG", {"pass_dir": str(store)}), \
-                patch("passclip.Prompt.ask", side_effect=["short"]):
+        with (
+            patch.dict("passclip.CONFIG", {"pass_dir": str(store)}),
+            patch("passclip.Prompt.ask", side_effect=["short"]),
+        ):
             cmd_export_vault(str(out_file))
         assert not out_file.exists()
         assert "12" in capsys.readouterr().out
@@ -147,15 +155,17 @@ class TestMarkupEscaping:
     def test_invalid_csv_name_is_escaped(self, tmp_path, capsys):
         csv_file = tmp_path / "import.csv"
         csv_file.write_text(
-            "name,folder,username,password,url,notes\n"
-            '"[red]bad$(x)[/red]",misc,u,pw,,\n'
+            'name,folder,username,password,url,notes\n"[red]bad$(x)[/red]",misc,u,pw,,\n'
         )
-        with patch("passclip._insert_entry", return_value=(True, "")), \
-                patch("passclip.get_all_entries", return_value=[]):
+        with (
+            patch("passclip._insert_entry", return_value=(True, "")),
+            patch("passclip.get_all_entries", return_value=[]),
+        ):
             cmd_import(str(csv_file), "generic")
         out = capsys.readouterr().out
-        assert "[red]bad$(x)[/red]" in out, \
+        assert "[red]bad$(x)[/red]" in out, (
             "untrusted CSV name must be shown literally, not parsed as markup"
+        )
 
     def test_field_output_is_raw(self, capsys):
         """--field output must be byte-exact (scripting path), not rich-rendered."""

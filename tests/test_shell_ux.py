@@ -78,34 +78,43 @@ class TestDoGenerateParsing:
 
 class TestSmartCopy:
     def test_exact_match_beats_substring(self):
-        with patch("passclip.get_all_entries", return_value=["mail", "email/gmail"]), \
-                patch("passclip.cmd_get") as get:
+        with (
+            patch("passclip.get_all_entries", return_value=["mail", "email/gmail"]),
+            patch("passclip.cmd_get") as get,
+        ):
             smart_copy(["mail"])
         get.assert_called_once_with("mail", clip=True)
 
     def test_single_substring_auto_selected(self):
-        with patch("passclip.get_all_entries", return_value=["email/gmail", "bank"]), \
-                patch("passclip.cmd_get") as get:
+        with (
+            patch("passclip.get_all_entries", return_value=["email/gmail", "bank"]),
+            patch("passclip.cmd_get") as get,
+        ):
             smart_copy(["gma"])
         get.assert_called_once_with("email/gmail", clip=True)
 
     def test_username_mode(self):
-        with patch("passclip.get_all_entries", return_value=["email/gmail"]), \
-                patch("passclip.get_entry_raw",
-                      return_value=("pw\nusername: alice\n", None)), \
-                patch("passclip.copy_to_clipboard") as cp:
+        with (
+            patch("passclip.get_all_entries", return_value=["email/gmail"]),
+            patch("passclip.get_entry_raw", return_value=("pw\nusername: alice\n", None)),
+            patch("passclip.copy_to_clipboard") as cp,
+        ):
             smart_copy(["gmail", "-u"])
         cp.assert_called_once_with("alice")
 
     def test_show_mode(self):
-        with patch("passclip.get_all_entries", return_value=["email/gmail"]), \
-                patch("passclip.cmd_get") as get:
+        with (
+            patch("passclip.get_all_entries", return_value=["email/gmail"]),
+            patch("passclip.cmd_get") as get,
+        ):
             smart_copy(["gmail", "-s"])
         get.assert_called_once_with("email/gmail")
 
     def test_unknown_flag_errors_instead_of_copying(self, capsys):
-        with patch("passclip.get_all_entries", return_value=["email/gmail"]), \
-                patch("passclip.cmd_get") as get:
+        with (
+            patch("passclip.get_all_entries", return_value=["email/gmail"]),
+            patch("passclip.cmd_get") as get,
+        ):
             smart_copy(["-S", "gmail"])  # typo'd flag must not copy the password
         get.assert_not_called()
         assert "unknown flag" in capsys.readouterr().out.lower()
@@ -125,16 +134,17 @@ class TestMainDispatch:
 
     def test_run_exit_code_propagates(self, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["passclip", "run", "e", "--", "cmd"])
-        with patch("passclip.cmd_run", return_value=7) as run, \
-                pytest.raises(SystemExit) as exc:
+        with patch("passclip.cmd_run", return_value=7) as run, pytest.raises(SystemExit) as exc:
             main()
         run.assert_called_once_with("e", ["cmd"])
         assert exc.value.code == 7
 
     def test_ctrl_c_exits_130_gracefully(self, monkeypatch, capsys):
         monkeypatch.setattr(sys, "argv", ["passclip"])
-        with patch("passclip._start_shell", side_effect=KeyboardInterrupt), \
-                pytest.raises(SystemExit) as exc:
+        with (
+            patch("passclip._start_shell", side_effect=KeyboardInterrupt),
+            pytest.raises(SystemExit) as exc,
+        ):
             main()
         assert exc.value.code == 130
         assert "Interrupted" in capsys.readouterr().out
@@ -147,14 +157,17 @@ class TestMainDispatch:
 
 class TestCmdRun:
     def test_returns_child_exit_code(self):
-        with patch("passclip.get_entry_raw", return_value=("pw", None)), \
-                patch("passclip.subprocess.run",
-                      return_value=MagicMock(returncode=7)):
+        with (
+            patch("passclip.get_entry_raw", return_value=("pw", None)),
+            patch("passclip.subprocess.run", return_value=MagicMock(returncode=7)),
+        ):
             assert cmd_run("e", ["somecmd"]) == 7
 
     def test_command_not_found_returns_127(self):
-        with patch("passclip.get_entry_raw", return_value=("pw", None)), \
-                patch("passclip.subprocess.run", side_effect=FileNotFoundError):
+        with (
+            patch("passclip.get_entry_raw", return_value=("pw", None)),
+            patch("passclip.subprocess.run", side_effect=FileNotFoundError),
+        ):
             assert cmd_run("e", ["nope"]) == 127
 
     def test_no_command_is_an_error(self):
@@ -162,9 +175,10 @@ class TestCmdRun:
 
     def test_env_names_sanitized(self):
         content = "pw\nrecovery code: 1234\n"
-        with patch("passclip.get_entry_raw", return_value=(content, None)), \
-                patch("passclip.subprocess.run",
-                      return_value=MagicMock(returncode=0)) as run:
+        with (
+            patch("passclip.get_entry_raw", return_value=(content, None)),
+            patch("passclip.subprocess.run", return_value=MagicMock(returncode=0)) as run,
+        ):
             cmd_run("e", ["somecmd"])
         env = run.call_args.kwargs["env"]
         assert "PASS_RECOVERY_CODE" in env
@@ -177,9 +191,11 @@ class TestCmdRun:
 
 
 def test_insert_asks_before_overwriting():
-    with patch("passclip.get_all_entries", return_value=["web/test"]), \
-            patch("passclip.Confirm.ask", return_value=False) as confirm, \
-            patch("passclip._insert_entry", return_value=(True, "")) as ins:
+    with (
+        patch("passclip.get_all_entries", return_value=["web/test"]),
+        patch("passclip.Confirm.ask", return_value=False) as confirm,
+        patch("passclip._insert_entry", return_value=(True, "")) as ins,
+    ):
         cmd_insert("web/test")
     confirm.assert_called()
     ins.assert_not_called()
@@ -192,9 +208,11 @@ def test_insert_asks_before_overwriting():
 
 class TestArchiveRestore:
     def test_restore_accepts_full_archive_path(self):
-        with patch("passclip.get_all_entries", return_value=["archive/web/foo"]), \
-                patch("passclip.Prompt.ask", return_value="web/foo"), \
-                patch("passclip.run_command", return_value=("", "", 0)) as run:
+        with (
+            patch("passclip.get_all_entries", return_value=["archive/web/foo"]),
+            patch("passclip.Prompt.ask", return_value="web/foo"),
+            patch("passclip.run_command", return_value=("", "", 0)) as run,
+        ):
             _shell().do_restore("archive/web/foo")
         run.assert_called_once_with(["pass", "mv", "archive/web/foo", "web/foo"])
 
@@ -236,19 +254,20 @@ def test_get_entry_raw_preserves_whitespace_password():
 
 def test_otp_add_preserves_entry_layout():
     original = "pw\nUser: Alice\n\nsome note: with colon\notp: OLDSECRET\ntrailing text"
-    with patch.dict("passclip.DEPS", {"pyotp": True}), \
-            patch("passclip.get_entry_raw", return_value=(original, None)), \
-            patch("passclip.Confirm.ask", return_value=True), \
-            patch("passclip._read_clipboard", return_value=None), \
-            patch("passclip.Prompt.ask", return_value=SEED), \
-            patch("passclip._insert_entry", return_value=(True, "")) as ins, \
-            patch("passclip.copy_to_clipboard"):
+    with (
+        patch.dict("passclip.DEPS", {"pyotp": True}),
+        patch("passclip.get_entry_raw", return_value=(original, None)),
+        patch("passclip.Confirm.ask", return_value=True),
+        patch("passclip._read_clipboard", return_value=None),
+        patch("passclip.Prompt.ask", return_value=SEED),
+        patch("passclip._insert_entry", return_value=(True, "")) as ins,
+        patch("passclip.copy_to_clipboard"),
+    ):
         cmd_otp_add("web/test")
     written = ins.call_args[0][1]
-    assert written == (
-        "pw\nUser: Alice\n\nsome note: with colon\ntrailing text\n"
-        f"otp: {SEED}\n"
-    ), "all original lines must survive byte-for-byte; only the otp line changes"
+    assert written == (f"pw\nUser: Alice\n\nsome note: with colon\ntrailing text\notp: {SEED}\n"), (
+        "all original lines must survive byte-for-byte; only the otp line changes"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -272,10 +291,12 @@ class TestValidateOtpSecret:
     def test_insert_rejects_weak_secret_via_helper(self, capsys):
         # 8-char secret: old inline check accepted it, strict helper refuses
         answers = ["Str0ngPass!x", "", "", "", "", "ABCDEFGH"]
-        with patch("passclip.Prompt.ask", side_effect=answers), \
-                patch.dict("passclip.DEPS", {"pyotp": True}), \
-                patch("passclip.get_all_entries", return_value=[]), \
-                patch("passclip._insert_entry", return_value=(True, "")) as ins:
+        with (
+            patch("passclip.Prompt.ask", side_effect=answers),
+            patch.dict("passclip.DEPS", {"pyotp": True}),
+            patch("passclip.get_all_entries", return_value=[]),
+            patch("passclip._insert_entry", return_value=(True, "")) as ins,
+        ):
             cmd_insert("web/test")
         content = ins.call_args[0][1]
         assert "otp:" not in content
