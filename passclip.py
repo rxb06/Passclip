@@ -338,7 +338,7 @@ def fuzzy_select(entries: List[str], prompt_text: str = "Select entry") -> Optio
     table.add_column("#", style="dim", width=4)
     table.add_column("Entry", style="green")
     for i, entry in enumerate(filtered, 1):
-        table.add_row(str(i), entry)
+        table.add_row(str(i), escape(entry))
     console.print(table)
     try:
         choice = IntPrompt.ask(f"{prompt_text} (number, 0 to cancel)", default=0)
@@ -553,21 +553,27 @@ def get_entry_raw(entry: str) -> Tuple[Optional[str], Optional[str]]:
     out, err, rc = run_command(["pass", "show", entry], strip=False)
     out = out.rstrip("\n")
     if rc != 0 or not out:
+        # escape at construction: these messages flow into markup-rendered
+        # _error() calls, and entry names may legally contain '[' and ']';
+        # the [bold]…[/bold] hints stay literal markup on purpose
         msg = err or ""
         lower = msg.lower()
         if "is not in the password store" in lower or (not msg and not out):
-            return None, f"Entry '{entry}' not found. Run [bold]ls[/bold] to see available entries."
+            return None, (f"Entry '{escape(entry)}' not found. "
+                          "Run [bold]ls[/bold] to see available entries.")
         if "decryption failed" in lower or "no secret key" in lower:
             return (
                 None,
-                f"Cannot decrypt '{entry}'. Is your GPG key unlocked? Try: gpg --card-status",
+                f"Cannot decrypt '{escape(entry)}'. "
+                "Is your GPG key unlocked? Try: gpg --card-status",
             )
         if "public key" in lower or "unusable public key" in lower:
             return (
                 None,
-                f"GPG key error for '{entry}'. Run [bold]gpg_list[/bold] to check your keys.",
+                f"GPG key error for '{escape(entry)}'. "
+                "Run [bold]gpg_list[/bold] to check your keys.",
             )
-        return None, msg or f"Entry '{entry}' not found."
+        return None, escape(msg) or f"Entry '{escape(entry)}' not found."
     return out, None
 
 
@@ -649,9 +655,67 @@ def strength_bar(score: int, color: str) -> str:
     return f"[{color}]{'█' * (score + 1)}{'░' * (4 - score)}[/{color}]"
 
 
+def _strength_table(rows: List[Dict], dup_set: set) -> Table:
+    """Entry/Strength/Len/Dup table shared by the health report's sections."""
+    t = Table(box=box.SIMPLE)
+    t.add_column("Entry", style="cyan")
+    t.add_column("Strength", justify="center")
+    t.add_column("Len", justify="right", style="dim")
+    t.add_column("Dup", justify="center")
+    for r in rows:
+        dup = "[red]YES[/red]" if r["entry"] in dup_set else ""
+        t.add_row(escape(r["entry"]),
+                  strength_bar(r["score"], r["color"]) + f" {r['label']}",
+                  str(r["len"]), dup)
+    return t
+
+
+# ---------------------------------------------------------------------------
+# OTP helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_otp_secret(data: Dict[str, str]) -> Optional[str]:
+    """Find an OTP secret under any of its common field names (or any
+    otpauth:// value)."""
+    secret = (
+        data.get("otp") or data.get("totp") or
+        data.get("secret") or data.get("otpauth")
+    )
+    if not secret:
+        for val in data.values():
+            if val and val.startswith("otpauth://"):
+                return val
+    return secret
+
+
+def _make_totp(secret: str):
+    """Build a pyotp TOTP from either a raw base32 secret or an otpauth:// URI."""
+    import pyotp
+    return pyotp.parse_uri(secret) if secret.startswith("otpauth://") \
+        else pyotp.TOTP(secret.upper().replace(" ", ""))
+
+
 # ---------------------------------------------------------------------------
 # Feature commands
 # ---------------------------------------------------------------------------
+
+
+def _copy_username(entry: str) -> None:
+    """Copy an entry's username (falling back to email) to the clipboard.
+
+    The single implementation behind `u`, smart copy -u, and the action menu.
+    """
+    content, error = get_entry_raw(entry)
+    if error:
+        _error(error)
+        return
+    data = parse_entry(content)
+    val = data.get("username") or data.get("email", "")
+    if val:
+        copy_to_clipboard(val)
+    else:
+        console.print(f"[yellow]No username or email found in '{escape(entry)}'.[/yellow]")
 
 
 def cmd_get(
@@ -669,7 +733,7 @@ def cmd_get(
 
     content, error = get_entry_raw(entry)
     if error:
-        console.print(f"[red]Error:[/red] {error}")
+        _error(error)
         return
 
     data = parse_entry(content)
@@ -677,7 +741,7 @@ def cmd_get(
     if field:
         value = data.get(field.lower())
         if value is None:
-            console.print(f"[red]Field '{field}' not found in entry '{entry}'.[/red]")
+            _error(f"Field '{escape(field)}' not found in entry '{escape(entry)}'.")
             return
         if clip:
             copy_to_clipboard(value)
@@ -691,20 +755,22 @@ def cmd_get(
         copy_to_clipboard(data["password"])
         return
 
-    # Rich display
+    # Rich display — every stored value is escaped: a password containing
+    # markup-like text (e.g. 'p[/]w') must render literally, not crash or
+    # display corrupted
     score, label, color = password_strength(data["password"])
-    lines = [f"[bold]Password:[/bold] {data['password']}"]
+    lines = [f"[bold]Password:[/bold] {escape(data['password'])}"]
     for key in ("username", "email", "url"):
         if data.get(key):
-            lines.append(f"[cyan]{key.capitalize()}:[/cyan] {data[key]}")
+            lines.append(f"[cyan]{key.capitalize()}:[/cyan] {escape(data[key])}")
     skip = {"password", "username", "email", "url", "notes"}
     for key, val in data.items():
         if key not in skip:
-            lines.append(f"[magenta]{key}:[/magenta] {val}")
+            lines.append(f"[magenta]{escape(key)}:[/magenta] {escape(val)}")
     if data.get("notes"):
-        lines.append(f"[dim]Notes:[/dim] {data['notes'].strip()}")
+        lines.append(f"[dim]Notes:[/dim] {escape(data['notes'].strip())}")
     lines.append(f"\n{strength_bar(score, color)} [dim]{label}[/dim]")
-    console.print(Panel("\n".join(lines), title=f"[bold cyan]{entry}[/bold cyan]",
+    console.print(Panel("\n".join(lines), title=f"[bold cyan]{escape(entry)}[/bold cyan]",
                         border_style="cyan"))
 
     if interactive_followup:
@@ -735,7 +801,7 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
         entry = Prompt.ask("[cyan]Entry name[/cyan] (e.g. web/github, email/work)")
     ok, err = validate_entry_name(entry)
     if not ok:
-        _error(err)
+        _error(escape(err))
         return
 
     # `pass insert -f` overwrites silently; ask first, like plain `pass` does
@@ -816,9 +882,9 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
 
     ok, err = _insert_entry(entry, content)
     if ok:
-        console.print(f"[green]Saved '[bold]{entry}[/bold]' successfully.[/green]")
+        console.print(f"[green]Saved '[bold]{escape(entry)}[/bold]' successfully.[/green]")
     else:
-        console.print(f"[red]Error:[/red] {err}")
+        _error(escape(err))
 
 
 def cmd_generate(
@@ -832,7 +898,7 @@ def cmd_generate(
         entry = Prompt.ask("[cyan]Entry name[/cyan]")
     ok, err = validate_entry_name(entry)
     if not ok:
-        _error(err)
+        _error(escape(err))
         return
     if not length:
         length = IntPrompt.ask("Length", default=CONFIG.get("default_password_length", 20))
@@ -850,10 +916,10 @@ def cmd_generate(
                 "Run [bold]init[/bold] to set up your password store."
             )
         else:
-            console.print(f"[red]Error:[/red] {err}")
+            _error(escape(err))
         return
 
-    console.print(f"[green]Generated password for '[bold]{entry}[/bold]'.[/green]")
+    console.print(f"[green]Generated password for '[bold]{escape(entry)}[/bold]'.[/green]")
     content, error = get_entry_raw(entry)
     if content:
         pw = parse_entry(content)["password"]
@@ -861,7 +927,8 @@ def cmd_generate(
         if clip:
             copy_to_clipboard(pw)
         else:
-            console.print(f"  Password: {pw}")
+            # escape: generated passwords can contain '[' and ']'
+            console.print(f"  Password: {escape(pw)}")
         console.print(f"  Strength: {strength_bar(score, color)} [dim]{label}[/dim]")
 
 
@@ -887,7 +954,7 @@ def cmd_health() -> None:
     ) as progress:
         task = progress.add_task("Analysing...", total=len(entries))
         for entry in entries:
-            progress.update(task, description=f"Scanning {entry}...")
+            progress.update(task, description=f"Scanning {escape(entry)}...")
             content, error = get_entry_raw(entry)
             if error or not content:
                 errors.append(entry)
@@ -923,16 +990,7 @@ def cmd_health() -> None:
 
     if weak:
         console.print("\n[bold red]Weak Passwords[/bold red] (update these):")
-        t = Table(box=box.SIMPLE)
-        t.add_column("Entry", style="cyan")
-        t.add_column("Strength", justify="center")
-        t.add_column("Len", justify="right", style="dim")
-        t.add_column("Dup", justify="center")
-        for r in weak:
-            dup = "[red]YES[/red]" if r["entry"] in dup_set else ""
-            t.add_row(r["entry"], strength_bar(r["score"], r["color"]) + f" {r['label']}",
-                      str(r["len"]), dup)
-        console.print(t)
+        console.print(_strength_table(weak, dup_set))
         console.print(
             "[dim]  Tip: run [bold]generate <entry>[/bold] to replace"
             " with a strong password[/dim]"
@@ -940,22 +998,13 @@ def cmd_health() -> None:
 
     if fair:
         console.print("\n[bold yellow]Fair Passwords[/bold yellow] (consider upgrading):")
-        t = Table(box=box.SIMPLE)
-        t.add_column("Entry", style="cyan")
-        t.add_column("Strength", justify="center")
-        t.add_column("Len", justify="right", style="dim")
-        t.add_column("Dup", justify="center")
-        for r in fair:
-            dup = "[red]YES[/red]" if r["entry"] in dup_set else ""
-            t.add_row(r["entry"], strength_bar(r["score"], r["color"]) + f" {r['label']}",
-                      str(r["len"]), dup)
-        console.print(t)
+        console.print(_strength_table(fair, dup_set))
 
     if dup_groups:
         console.print("\n[bold magenta]Duplicate Passwords[/bold magenta]:")
         for i, (_, group) in enumerate(list(dup_groups.items())[:10], 1):
             console.print(
-                f"  Group {i}: " + "  |  ".join(f"[cyan]{e}[/cyan]" for e in group)
+                f"  Group {i}: " + "  |  ".join(f"[cyan]{escape(e)}[/cyan]" for e in group)
             )
         console.print("[dim]  Tip: use unique passwords for each account[/dim]")
 
@@ -974,8 +1023,6 @@ def cmd_otp(entry: Optional[str] = None) -> None:
         )
         return
 
-    import pyotp
-
     if not entry:
         entries = get_all_entries()
         entry = fuzzy_select(entries, "Select OTP entry")
@@ -984,39 +1031,30 @@ def cmd_otp(entry: Optional[str] = None) -> None:
 
     content, error = get_entry_raw(entry)
     if error:
-        console.print(f"[red]Error:[/red] {error}")
+        _error(error)
         return
 
     data = parse_entry(content)
-    secret = (
-        data.get("otp") or data.get("totp") or
-        data.get("secret") or data.get("otpauth")
-    )
-    if not secret:
-        for val in data.values():
-            if val and val.startswith("otpauth://"):
-                secret = val
-                break
+    secret = _extract_otp_secret(data)
 
     if not secret:
-        console.print(f"[red]No OTP secret in '{entry}'.[/red]")
-        console.print(
-            f"[dim]Run [bold]passclip otp --add {entry}[/bold] to set one up.[/dim]"
+        _error(
+            f"No OTP secret in '{escape(entry)}'.",
+            f"Run [bold]passclip otp --add {escape(entry)}[/bold] to set one up.",
         )
         return
 
     try:
-        totp = pyotp.parse_uri(secret) if secret.startswith("otpauth://") \
-            else pyotp.TOTP(secret.upper().replace(" ", ""))
+        totp = _make_totp(secret)
     except Exception as e:
-        console.print(f"[red]Invalid OTP secret:[/red] {e}")
+        _error(f"Invalid OTP secret: {escape(str(e))}")
         return
 
     code = totp.now()
     remaining = 30 - (int(time.time()) % 30)
     console.print(Panel(
         f"[bold green]{code[:len(code)//2]} {code[len(code)//2:]}[/bold green]\n"
-        f"[dim]Valid for {remaining}s  |  {entry}[/dim]",
+        f"[dim]Valid for {remaining}s  |  {escape(entry)}[/dim]",
         title="[bold]OTP Code[/bold]", border_style="green",
     ))
     copy_to_clipboard(code, timeout=remaining + 2)
@@ -1056,8 +1094,6 @@ def cmd_otp_add(entry: Optional[str] = None) -> None:
         )
         return
 
-    import pyotp
-
     if not entry:
         entries = get_all_entries()
         entry = fuzzy_select(entries, "Select entry to add OTP")
@@ -1067,16 +1103,14 @@ def cmd_otp_add(entry: Optional[str] = None) -> None:
     # Check if entry exists
     content, error = get_entry_raw(entry)
     if error:
-        console.print(f"[red]Error:[/red] {error}")
+        _error(error)
         return
 
     data = parse_entry(content)
-    existing_otp = (
-        data.get("otp") or data.get("totp") or
-        data.get("secret") or data.get("otpauth")
-    )
-    if existing_otp:
-        console.print(f"[yellow]'{entry}' already has an OTP secret configured.[/yellow]")
+    if _extract_otp_secret(data):
+        console.print(
+            f"[yellow]'{escape(entry)}' already has an OTP secret configured.[/yellow]"
+        )
         if not Confirm.ask("Overwrite?", default=False):
             return
 
@@ -1099,7 +1133,8 @@ def cmd_otp_add(entry: Optional[str] = None) -> None:
                 err = _validate_otp_secret(clip)
                 if err:
                     console.print(
-                        f"[yellow]Clipboard value is not a valid OTP secret: {err}[/yellow]"
+                        f"[yellow]Clipboard value is not a valid OTP secret: "
+                        f"{escape(err)}[/yellow]"
                     )
                 else:
                     secret = clip
@@ -1116,7 +1151,7 @@ def cmd_otp_add(entry: Optional[str] = None) -> None:
         raw = raw.strip()
         err = _validate_otp_secret(raw)
         if err:
-            _error(f"Invalid OTP secret: {err}")
+            _error(f"Invalid OTP secret: {escape(err)}")
             return
         secret = raw
 
@@ -1131,25 +1166,26 @@ def cmd_otp_add(entry: Optional[str] = None) -> None:
     new_content = "\n".join(kept + [f"otp: {secret}"]) + "\n"
     ok, err = _insert_entry(entry, new_content)
     if not ok:
-        _error(f"Failed to save: {err}")
+        _error(f"Failed to save: {escape(err)}")
         return
 
     # Show the first code as confirmation
     try:
-        totp = pyotp.parse_uri(secret) if secret.startswith("otpauth://") \
-            else pyotp.TOTP(secret.upper().replace(" ", ""))
+        totp = _make_totp(secret)
         code = totp.now()
         remaining = 30 - (int(time.time()) % 30)
         console.print(Panel(
-            f"[green]OTP configured for[/green] [bold]{entry}[/bold]\n\n"
+            f"[green]OTP configured for[/green] [bold]{escape(entry)}[/bold]\n\n"
             f"[bold green]{code[:len(code)//2]} {code[len(code)//2:]}[/bold green]\n"
             f"[dim]Valid for {remaining}s[/dim]",
             title="[bold]OTP Added[/bold]", border_style="green",
         ))
         copy_to_clipboard(code, timeout=remaining + 2)
     except Exception as e:
-        console.print(f"[green]OTP secret saved to '{entry}'.[/green]")
-        console.print(f"[yellow]Warning: could not generate first code: {e}[/yellow]")
+        console.print(f"[green]OTP secret saved to '{escape(entry)}'.[/green]")
+        console.print(
+            f"[yellow]Warning: could not generate first code: {escape(str(e))}[/yellow]"
+        )
 
 
 def cmd_run(entry: str, command: List[str]) -> int:
@@ -1205,7 +1241,7 @@ def cmd_sync() -> None:
         console.print(f"[dim]{action.capitalize()}ing...[/dim]")
         out, err, rc = run_command(["pass", "git", action])
         if rc != 0:
-            console.print(f"[red]{action.capitalize()} failed:[/red] {err or out}")
+            console.print(f"[red]{action.capitalize()} failed:[/red] {escape(err or out)}")
             return
         if out:
             console.print(escape(out))
@@ -1220,7 +1256,7 @@ def cmd_git_log(n: int = 10) -> None:
         "--format=%C(yellow)%h%Creset %C(green)%ar%Creset %s",
     ])
     if rc != 0:
-        console.print(f"[red]Error:[/red] {err}")
+        _error(escape(err))
         return
     if not out:
         console.print("[yellow]No git history found. Run 'sync' to set up remote.[/yellow]")
@@ -1389,19 +1425,19 @@ def _preview_entry_metadata(entry: str) -> None:
     if error:
         return
     data = parse_entry(content)
-    parts = [f"[bold]{entry}[/bold]"]
+    parts = [f"[bold]{escape(entry)}[/bold]"]
     if data.get("username"):
-        parts.append(f"  [dim]Username:[/dim] {data['username']}")
+        parts.append(f"  [dim]Username:[/dim] {escape(data['username'])}")
     if data.get("email"):
-        parts.append(f"  [dim]Email:[/dim] {data['email']}")
+        parts.append(f"  [dim]Email:[/dim] {escape(data['email'])}")
     if data.get("url"):
-        parts.append(f"  [dim]URL:[/dim] {data['url']}")
+        parts.append(f"  [dim]URL:[/dim] {escape(data['url'])}")
     console.print("\n".join(parts))
 
 
 def _entry_action_menu(entry: str, default_action: str = "s") -> None:
     """Show an action menu for a selected entry and execute the chosen action."""
-    console.print(f"\n[dim]Selected:[/dim] [bold]{entry}[/bold]")
+    console.print(f"\n[dim]Selected:[/dim] [bold]{escape(entry)}[/bold]")
 
     # Highlight the default action
     items = [
@@ -1429,20 +1465,11 @@ def _entry_action_menu(entry: str, default_action: str = "s") -> None:
     elif action == "c":
         cmd_get(entry, clip=True)
     elif action == "u":
-        content, error = get_entry_raw(entry)
-        if error:
-            console.print(f"[red]Error:[/red] {error}")
-        else:
-            data = parse_entry(content)
-            username = data.get("username") or data.get("email", "")
-            if username:
-                copy_to_clipboard(username)
-            else:
-                console.print("[yellow]No username or email found in this entry.[/yellow]")
+        _copy_username(entry)
     elif action == "l":
         content, error = get_entry_raw(entry)
         if error:
-            console.print(f"[red]Error:[/red] {error}")
+            _error(error)
         else:
             data = parse_entry(content)
             url = data.get("url", "")
@@ -1453,18 +1480,9 @@ def _entry_action_menu(entry: str, default_action: str = "s") -> None:
     elif action == "o":
         cmd_otp(entry)
     elif action == "e":
-        run_command(["pass", "edit", entry], interactive=True)
+        cmd_edit(entry)
     elif action == "d":
-        _preview_entry_metadata(entry)
-        if Confirm.ask(f"[red]Delete '{entry}'?[/red]", default=False):
-            backup = _backup_entry(entry)
-            if backup:
-                console.print(f"[dim]Backup saved: {backup}[/dim]")
-            _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
-            console.print(
-                f"[green]Deleted '{entry}'.[/green]" if rc == 0
-                else f"[red]Error:[/red] {err}"
-            )
+        cmd_delete(entry)
 
 
 def cmd_browse() -> None:
@@ -1479,6 +1497,145 @@ def cmd_browse() -> None:
         return
 
     _entry_action_menu(entry, default_action="c")
+
+
+# ---------------------------------------------------------------------------
+# Entry-management commands — one implementation each, shared by the
+# interactive shell (do_*) and the CLI dispatch in main()
+# ---------------------------------------------------------------------------
+
+
+def cmd_edit(entry: Optional[str]) -> None:
+    """Open an entry in $EDITOR via `pass edit`."""
+    entry = entry or fuzzy_select(get_all_entries(), "Select entry to edit")
+    if entry:
+        run_command(["pass", "edit", entry], interactive=True)
+
+
+def cmd_delete(entry: Optional[str], force: bool = False) -> None:
+    """Delete an entry: preview, confirm, back up, then `pass rm`."""
+    if not entry:
+        entry = fuzzy_select(get_all_entries(), "Select entry to delete")
+        if not entry:
+            return
+    if not force:
+        _preview_entry_metadata(entry)
+        if not Confirm.ask(f"[red]Delete '{escape(entry)}'?[/red]", default=False):
+            return
+    backup = _backup_entry(entry)
+    if backup:
+        console.print(f"[dim]Backup saved: {backup}[/dim]")
+    _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
+    if rc == 0:
+        console.print(f"[green]Deleted '{escape(entry)}'.[/green]")
+    else:
+        _error(escape(err))
+
+
+def cmd_ls(path: str = "") -> None:
+    """List entries via `pass ls`."""
+    if path.startswith("-"):
+        _error("Path cannot start with '-'.")
+        return
+    cmd_args = ["pass", "ls"] + ([path] if path else [])
+    out, err, rc = run_command(cmd_args)
+    console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
+
+
+def cmd_find(term: str) -> None:
+    """Search entries by name, then optionally act on a result."""
+    if term.startswith("-"):
+        _error("Search term cannot start with '-'.")
+        return
+    out, err, rc = run_command(["pass", "find", term])
+    console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
+    if rc == 0:
+        matches = [e for e in get_all_entries() if term.lower() in e.lower()]
+        if matches:
+            entry = fuzzy_select(matches, "Act on entry (0 to skip)")
+            if entry:
+                _entry_action_menu(entry)
+
+
+def _move_or_copy(action: str, old: str, new: str) -> None:
+    verb = "Moved" if action == "mv" else "Copied"
+    if old.startswith("-"):
+        _error("Source entry cannot start with '-'.")
+        return
+    ok, err_msg = validate_entry_name(new)
+    if not ok:
+        _error(err_msg)
+        return
+    _, err, rc = run_command(["pass", action, old, new])
+    if rc == 0:
+        console.print(f"[green]{verb} '{escape(old)}' -> '{escape(new)}'.[/green]")
+    else:
+        _error(escape(err))
+
+
+def cmd_mv(old: str, new: str) -> None:
+    """Move or rename an entry."""
+    _move_or_copy("mv", old, new)
+
+
+def cmd_cp(old: str, new: str) -> None:
+    """Copy an entry."""
+    _move_or_copy("cp", old, new)
+
+
+def cmd_archive(entry: Optional[str]) -> None:
+    """Move an entry into the archive/ folder."""
+    entry = entry or fuzzy_select(get_all_entries(), "Select entry to archive")
+    if not entry:
+        return
+    if entry.startswith("archive/"):
+        console.print(f"[yellow]'{escape(entry)}' is already archived.[/yellow]")
+        return
+    _, err, rc = run_command(["pass", "mv", entry, f"archive/{entry}"])
+    if rc == 0:
+        console.print(f"[green]Archived '{escape(entry)}'.[/green]")
+    else:
+        _error(escape(err))
+
+
+def cmd_restore(entry: Optional[str]) -> None:
+    """Restore an entry from the archive/ folder."""
+    archived = [e for e in get_all_entries() if e.startswith("archive/")]
+    if not archived:
+        console.print("[yellow]No archived entries found.[/yellow]")
+        return
+    display = [e[len("archive/"):] for e in archived]
+    entry = entry or fuzzy_select(display, "Select entry to restore")
+    if not entry:
+        return
+    # Accept the name as `ls` displays it ('archive/web/foo') too
+    entry = entry.removeprefix("archive/")
+    dest = Prompt.ask("Restore to", default=entry)
+    ok, err_msg = validate_entry_name(dest)
+    if not ok:
+        _error(err_msg)
+        return
+    _, err, rc = run_command(["pass", "mv", f"archive/{entry}", dest])
+    if rc == 0:
+        console.print(f"[green]Restored to '{escape(dest)}'.[/green]")
+    else:
+        _error(escape(err))
+
+
+def cmd_config(key: Optional[str], value: Optional[str]) -> None:
+    """View all config, view one key, or set a key."""
+    if not key:
+        cmd_config_show()
+    elif not value:
+        # falsy, not `is None`: the CLI's historical `config <key> ""`
+        # is a read — an empty value must never become a write
+        val = CONFIG.get(key)
+        console.print(
+            f"{escape(key)} = {val}" if val is not None
+            else f"[red]Unknown key: {escape(key)}[/red]"
+        )
+    else:
+        cmd_config_set(key, value)
 
 
 # ---------------------------------------------------------------------------
@@ -1555,16 +1712,7 @@ def smart_copy(args: List[str]) -> None:
     if mode == "password":
         cmd_get(entry, clip=True)
     elif mode == "username":
-        content, error = get_entry_raw(entry)
-        if error:
-            _error(error)
-            return
-        data = parse_entry(content)
-        val = data.get("username") or data.get("email", "")
-        if val:
-            copy_to_clipboard(val)
-        else:
-            console.print(f"[yellow]No username found in '{entry}'.[/yellow]")
+        _copy_username(entry)
     elif mode == "otp":
         cmd_otp(entry)
     elif mode == "show":
@@ -1884,7 +2032,7 @@ def cmd_wizard() -> None:
     console.print(f"\n[bold]Step 3[/bold] — Initializing pass with key [cyan]{key_id}[/cyan]")
     out, err, rc = run_command(["pass", "init", key_id])
     if rc != 0 and "already initialized" not in (err + out):
-        console.print(f"[red]Error:[/red] {err}")
+        _error(escape(err))
         return
     console.print("[green]✓ Password store ready.[/green]")
 
@@ -1936,7 +2084,7 @@ def cmd_config_show() -> None:
 def cmd_config_set(key: str, value: str) -> None:
     """Set a config key to a new value, with type coercion and validation."""
     if key not in DEFAULT_CONFIG:
-        console.print(f"[red]Unknown key:[/red] {key}")
+        console.print(f"[red]Unknown key:[/red] {escape(key)}")
         console.print(f"Valid keys: {', '.join(DEFAULT_CONFIG)}")
         return
     original_type = type(DEFAULT_CONFIG[key])
@@ -1948,7 +2096,7 @@ def cmd_config_set(key: str, value: str) -> None:
         else:
             typed_value = value
     except ValueError:
-        console.print(f"[red]Expected {original_type.__name__} for '{key}'.[/red]")
+        console.print(f"[red]Expected {original_type.__name__} for '{escape(key)}'.[/red]")
         return
     # Validate pass_dir exists
     if key == "pass_dir":
@@ -1960,7 +2108,7 @@ def cmd_config_set(key: str, value: str) -> None:
         typed_value = str(p)
     CONFIG[key] = typed_value
     save_config(CONFIG)
-    console.print(f"[green]Set[/green] {key} = {typed_value}")
+    console.print(f"[green]Set[/green] {escape(key)} = {escape(str(typed_value))}")
 
 
 # ---------------------------------------------------------------------------
@@ -2085,18 +2233,8 @@ class PassShell(cmd.Cmd):
         """u [term]  Quick copy username (fuzzy search)."""
         term = arg.strip()
         entry = _fuzzy_match(term) if term else fuzzy_select(get_all_entries(), "Copy username")
-        if not entry:
-            return
-        content, error = get_entry_raw(entry)
-        if error:
-            _error(error)
-            return
-        data = parse_entry(content)
-        val = data.get("username") or data.get("email", "")
-        if val:
-            copy_to_clipboard(val)
-        else:
-            console.print(f"[yellow]No username found in '{entry}'.[/yellow]")
+        if entry:
+            _copy_username(entry)
 
     def do_o(self, arg: str) -> None:
         """o [term]  Quick copy OTP code (fuzzy search)."""
@@ -2169,27 +2307,13 @@ class PassShell(cmd.Cmd):
 
     def do_edit(self, arg: str) -> None:
         """edit [entry]  Edit an entry in your $EDITOR."""
-        entry = arg.strip() or fuzzy_select(get_all_entries(), "Select entry to edit")
-        if entry:
-            run_command(["pass", "edit", entry], interactive=True)
+        cmd_edit(arg.strip() or None)
 
     complete_edit = _complete_entries
 
     def do_delete(self, arg: str) -> None:
         """delete [entry]  Delete a password entry."""
-        entry = arg.strip() or fuzzy_select(get_all_entries(), "Select entry to delete")
-        if not entry:
-            return
-        _preview_entry_metadata(entry)
-        if Confirm.ask(f"[red]Delete '{entry}'?[/red]", default=False):
-            backup = _backup_entry(entry)
-            if backup:
-                console.print(f"[dim]Backup saved: {backup}[/dim]")
-            _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
-            console.print(
-                f"[green]Deleted '{entry}'.[/green]" if rc == 0
-                else f"[red]Error:[/red] {err}"
-            )
+        cmd_delete(arg.strip() or None)
 
     complete_delete = _complete_entries
 
@@ -2199,27 +2323,11 @@ class PassShell(cmd.Cmd):
 
     def do_ls(self, arg: str) -> None:
         """ls [path]  List all entries."""
-        if arg.strip().startswith("-"):
-            _error("Path cannot start with '-'.")
-            return
-        cmd_args = ["pass", "ls"] + ([arg.strip()] if arg.strip() else [])
-        out, err, rc = run_command(cmd_args)
-        console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
+        cmd_ls(arg.strip())
 
     def do_find(self, arg: str) -> None:
         """find <term>  Search entries by name, then optionally act on a result."""
-        term = arg.strip() or Prompt.ask("Search term")
-        if term.startswith("-"):
-            _error("Search term cannot start with '-'.")
-            return
-        out, err, rc = run_command(["pass", "find", term])
-        console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
-        if rc == 0:
-            matches = [e for e in get_all_entries() if term.lower() in e.lower()]
-            if matches:
-                entry = fuzzy_select(matches, "Act on entry (0 to skip)")
-                if entry:
-                    _entry_action_menu(entry)
+        cmd_find(arg.strip() or Prompt.ask("Search term"))
 
     # -- Power user commands -------------------------------------------------
 
@@ -2282,18 +2390,7 @@ class PassShell(cmd.Cmd):
         else:
             old = Prompt.ask("Source entry")
             new = Prompt.ask("Destination")
-        if old.startswith("-"):
-            _error("Source entry cannot start with '-'.")
-            return
-        ok, err_msg = validate_entry_name(new)
-        if not ok:
-            _error(err_msg)
-            return
-        _, err, rc = run_command(["pass", "mv", old, new])
-        console.print(
-            f"[green]Moved '{old}' -> '{new}'.[/green]" if rc == 0
-            else f"[red]Error:[/red] {err}"
-        )
+        cmd_mv(old, new)
 
     def do_cp(self, arg: str) -> None:
         """cp <old> <new>  Copy an entry."""
@@ -2303,57 +2400,17 @@ class PassShell(cmd.Cmd):
         else:
             old = Prompt.ask("Source entry")
             new = Prompt.ask("Destination")
-        if old.startswith("-"):
-            _error("Source entry cannot start with '-'.")
-            return
-        ok, err_msg = validate_entry_name(new)
-        if not ok:
-            _error(err_msg)
-            return
-        _, err, rc = run_command(["pass", "cp", old, new])
-        console.print(
-            f"[green]Copied '{old}' -> '{new}'.[/green]" if rc == 0
-            else f"[red]Error:[/red] {err}"
-        )
+        cmd_cp(old, new)
 
     def do_archive(self, arg: str) -> None:
         """archive [entry]  Move an entry to the archive/ folder."""
-        entry = arg.strip() or fuzzy_select(get_all_entries(), "Select entry to archive")
-        if not entry:
-            return
-        if entry.startswith("archive/"):
-            console.print(f"[yellow]'{escape(entry)}' is already archived.[/yellow]")
-            return
-        _, err, rc = run_command(["pass", "mv", entry, f"archive/{entry}"])
-        console.print(
-            f"[green]Archived '{entry}'.[/green]" if rc == 0
-            else f"[red]Error:[/red] {err}"
-        )
+        cmd_archive(arg.strip() or None)
 
     complete_archive = _complete_entries
 
     def do_restore(self, arg: str) -> None:
         """restore [entry]  Restore an entry from the archive/ folder."""
-        archived = [e for e in get_all_entries() if e.startswith("archive/")]
-        if not archived:
-            console.print("[yellow]No archived entries found.[/yellow]")
-            return
-        display = [e[len("archive/"):] for e in archived]
-        entry = arg.strip() or fuzzy_select(display, "Select entry to restore")
-        if not entry:
-            return
-        # Accept the name as `ls` displays it ('archive/web/foo') too
-        entry = entry.removeprefix("archive/")
-        dest = Prompt.ask("Restore to", default=entry)
-        ok, err_msg = validate_entry_name(dest)
-        if not ok:
-            _error(err_msg)
-            return
-        _, err, rc = run_command(["pass", "mv", f"archive/{entry}", dest])
-        console.print(
-            f"[green]Restored to '{dest}'.[/green]" if rc == 0
-            else f"[red]Error:[/red] {err}"
-        )
+        cmd_restore(arg.strip() or None)
 
     # -- GPG & store setup ---------------------------------------------------
 
@@ -2393,10 +2450,10 @@ class PassShell(cmd.Cmd):
         if 1 <= choice <= len(keys):
             key_id = keys[choice - 1][0]
             _, err, rc = run_command(["pass", "init", key_id])
-            console.print(
-                f"[green]Initialized with key {key_id}.[/green]" if rc == 0
-                else f"[red]Error:[/red] {err}"
-            )
+            if rc == 0:
+                console.print(f"[green]Initialized with key {key_id}.[/green]")
+            else:
+                _error(escape(err))
 
     def do_wizard(self, arg: str) -> None:
         """wizard  Run the first-time setup wizard."""
@@ -2407,16 +2464,9 @@ class PassShell(cmd.Cmd):
     def do_config(self, arg: str) -> None:
         """config [key] [value]  View or change a config value."""
         parts = arg.split()
-        if not parts:
-            cmd_config_show()
-        elif len(parts) == 1:
-            val = CONFIG.get(parts[0])
-            console.print(
-                f"{parts[0]} = {val}" if val is not None
-                else f"[red]Unknown key: {parts[0]}[/red]"
-            )
-        else:
-            cmd_config_set(parts[0], " ".join(parts[1:]))
+        key = parts[0] if parts else None
+        value = " ".join(parts[1:]) if len(parts) > 1 else None
+        cmd_config(key, value)
 
     # -- Misc ----------------------------------------------------------------
 
@@ -2532,8 +2582,12 @@ class PassShell(cmd.Cmd):
 # ---------------------------------------------------------------------------
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Build the CLI argument parser with all subcommands."""
+def build_parser() -> Tuple[argparse.ArgumentParser, set]:
+    """Build the CLI argument parser. Returns (parser, set of subcommand names).
+
+    The set is derived from the registered subparsers, so the smart-copy
+    fast path in _main() can never drift from the real command list.
+    """
     p = argparse.ArgumentParser(
         prog="passclip",
         description="Passclip — A CLI built on top of pass that adds what it's missing",
@@ -2680,7 +2734,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite existing password store without prompting",
     )
 
-    return p
+    return p, set(sub.choices)
 
 
 def _start_shell() -> None:
@@ -2713,19 +2767,14 @@ def _main() -> None:
     # If the first argument isn't a known subcommand or flag, treat the whole
     # invocation as a fuzzy search + copy.  This is the fast path for daily
     # use — type "passclip gmail" and the password is in your clipboard.
-    _known = {
-        "get", "show", "clip", "insert", "add", "generate", "edit",
-        "delete", "browse", "health", "otp", "run", "sync", "gitlog",
-        "import", "find", "ls", "mv", "cp", "archive", "restore",
-        "wizard", "config", "shell", "export-vault", "import-vault",
-    }
+    parser, known_commands = build_parser()
     _smart_flags = {"-u", "--user", "-o", "--otp", "-s", "--show"}
     first = sys.argv[1]
-    if (first not in _known and not first.startswith("-")) or first in _smart_flags:
+    if (first not in known_commands and not first.startswith("-")) \
+            or first in _smart_flags:
         smart_copy(sys.argv[1:])
         return
 
-    parser = build_parser()
     args = parser.parse_args()
 
     if not args.command or args.command == "shell":
@@ -2744,24 +2793,10 @@ def _main() -> None:
         cmd_generate(args.entry, args.length, args.no_symbols, args.clip)
 
     elif args.command == "edit":
-        entry = args.entry or fuzzy_select(get_all_entries(), "Select entry to edit")
-        if entry:
-            run_command(["pass", "edit", entry], interactive=True)
+        cmd_edit(args.entry)
 
     elif args.command == "delete":
-        entry = args.entry or fuzzy_select(get_all_entries(), "Select entry to delete")
-        if entry:
-            if not args.force:
-                _preview_entry_metadata(entry)
-            if args.force or Confirm.ask(f"[red]Delete '{entry}'?[/red]", default=False):
-                backup = _backup_entry(entry)
-                if backup:
-                    console.print(f"[dim]Backup saved: {backup}[/dim]")
-                _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
-                console.print(
-                    f"[green]Deleted '{entry}'.[/green]" if rc == 0
-                    else f"[red]{err}[/red]"
-                )
+        cmd_delete(args.entry, force=args.force)
 
     elif args.command == "browse":
         cmd_browse()
@@ -2791,98 +2826,28 @@ def _main() -> None:
         cmd_import(args.file, args.format, dry_run=getattr(args, "dry_run", False))
 
     elif args.command == "find":
-        if args.term.startswith("-"):
-            _error("Search term cannot start with '-'.")
-            return
-        out, err, rc = run_command(["pass", "find", args.term])
-        console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
-        if rc == 0:
-            matches = [e for e in get_all_entries() if args.term.lower() in e.lower()]
-            if matches:
-                entry = fuzzy_select(matches, "Act on entry (0 to skip)")
-                if entry:
-                    _entry_action_menu(entry)
+        cmd_find(args.term)
 
     elif args.command == "ls":
-        if args.path.startswith("-"):
-            _error("Path cannot start with '-'.")
-            return
-        cmd_args = ["pass", "ls"] + ([args.path] if args.path else [])
-        out, err, rc = run_command(cmd_args)
-        console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
+        cmd_ls(args.path)
 
     elif args.command == "mv":
-        if args.old.startswith("-"):
-            _error("Source entry cannot start with '-'.")
-            return
-        ok, err_msg = validate_entry_name(args.new)
-        if not ok:
-            _error(err_msg)
-            return
-        _, err, rc = run_command(["pass", "mv", args.old, args.new])
-        console.print(
-            f"[green]Moved '{args.old}' -> '{args.new}'.[/green]" if rc == 0
-            else f"[red]{err}[/red]"
-        )
+        cmd_mv(args.old, args.new)
 
     elif args.command == "cp":
-        if args.old.startswith("-"):
-            _error("Source entry cannot start with '-'.")
-            return
-        ok, err_msg = validate_entry_name(args.new)
-        if not ok:
-            _error(err_msg)
-            return
-        _, err, rc = run_command(["pass", "cp", args.old, args.new])
-        console.print(
-            f"[green]Copied '{args.old}' -> '{args.new}'.[/green]" if rc == 0
-            else f"[red]{err}[/red]"
-        )
+        cmd_cp(args.old, args.new)
 
     elif args.command == "archive":
-        entry = args.entry or fuzzy_select(get_all_entries(), "Select entry to archive")
-        if entry:
-            if entry.startswith("archive/"):
-                console.print(f"[yellow]'{escape(entry)}' is already archived.[/yellow]")
-                return
-            _, err, rc = run_command(["pass", "mv", entry, f"archive/{entry}"])
-            console.print(
-                f"[green]Archived '{entry}'.[/green]" if rc == 0
-                else f"[red]{err}[/red]"
-            )
+        cmd_archive(args.entry)
 
     elif args.command == "restore":
-        archived = [e for e in get_all_entries() if e.startswith("archive/")]
-        display = [e[len("archive/"):] for e in archived]
-        entry = args.entry or fuzzy_select(display, "Select entry to restore")
-        if entry:
-            # Accept the name as `ls` displays it ('archive/web/foo') too
-            entry = entry.removeprefix("archive/")
-            dest = Prompt.ask("Restore to", default=entry)
-            ok, err_msg = validate_entry_name(dest)
-            if not ok:
-                _error(err_msg)
-                return
-            _, err, rc = run_command(["pass", "mv", f"archive/{entry}", dest])
-            console.print(
-                f"[green]Restored to '{dest}'.[/green]" if rc == 0
-                else f"[red]{err}[/red]"
-            )
+        cmd_restore(args.entry)
 
     elif args.command == "wizard":
         cmd_wizard()
 
     elif args.command == "config":
-        if not args.key:
-            cmd_config_show()
-        elif not args.value:
-            val = CONFIG.get(args.key)
-            console.print(
-                f"{args.key} = {val}" if val is not None
-                else f"[red]Unknown key: {args.key}[/red]"
-            )
-        else:
-            cmd_config_set(args.key, args.value)
+        cmd_config(args.key, args.value)
 
     elif args.command == "export-vault":
         cmd_export_vault(args.file)
