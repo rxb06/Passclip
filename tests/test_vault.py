@@ -18,7 +18,7 @@ from passclip import (
     get_all_entries,
 )
 
-PASSPHRASE = "correct-horse-battery!7"
+PASSPHRASE = "correct-horse-battery!7"  # credactor:ignore - test fixture, not a real secret
 
 
 def _make_vault(path, passphrase, members):
