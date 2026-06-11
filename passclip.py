@@ -59,6 +59,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from rich import box
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.prompt import Confirm, IntPrompt, Prompt
@@ -261,7 +262,9 @@ def get_all_entries() -> List[str]:
         entry = str(rel)
         if entry.endswith(".gpg"):
             entry = entry[:-4]
-        if not entry.startswith("."):
+        # Skip hidden entries, and names starting with '-' (a planted
+        # '-x.gpg' would be parsed as a flag when passed to `pass` argv)
+        if not entry.startswith((".", "-")):
             entries.append(entry)
     return sorted(entries)
 
@@ -663,7 +666,9 @@ def cmd_get(
         if clip:
             copy_to_clipboard(value)
         else:
-            console.print(value)
+            # Raw output: --field is the scripting path — no markup parsing,
+            # no line wrapping, byte-exact value
+            sys.stdout.write(value + "\n")
         return
 
     if clip:
@@ -1167,7 +1172,7 @@ def cmd_sync() -> None:
             console.print(f"[red]{action.capitalize()} failed:[/red] {err or out}")
             return
         if out:
-            console.print(out)
+            console.print(escape(out))
     console.print("[bold green]Sync complete.[/bold green]")
 
 
@@ -1184,7 +1189,8 @@ def cmd_git_log(n: int = 10) -> None:
     if not out:
         console.print("[yellow]No git history found. Run 'sync' to set up remote.[/yellow]")
         return
-    console.print(Panel(out, title="[bold]Password Store History[/bold]", border_style="dim"))
+    console.print(Panel(escape(out), title="[bold]Password Store History[/bold]",
+                        border_style="dim"))
 
 
 def _parse_csv_row(row: Dict[str, str], fmt: str) -> Dict[str, str]:
@@ -1286,17 +1292,17 @@ def cmd_import(filepath: str, fmt: str = "auto", dry_run: bool = False) -> None:
                 entry_path = _sanitize_entry_path(name, fields["folder"])
                 if not entry_path:
                     invalid += 1
-                    console.print(f"  [yellow]⚠[/yellow] Invalid name: {name}")
+                    console.print(f"  [yellow]⚠[/yellow] Invalid name: {escape(name)}")
                     continue
 
                 if dry_run:
                     dup = " [yellow](exists)[/yellow]" if entry_path in existing else ""
-                    console.print(f"  [dim]→[/dim] {entry_path}{dup}")
+                    console.print(f"  [dim]→[/dim] {escape(entry_path)}{dup}")
                     imported += 1
                     continue
 
                 if entry_path in existing:
-                    console.print(f"  [yellow]⚠[/yellow] {entry_path} (overwriting)")
+                    console.print(f"  [yellow]⚠[/yellow] {escape(entry_path)} (overwriting)")
 
                 data: Dict[str, str] = {"password": password}
                 for key in ("username", "url", "notes", "otp"):
@@ -1306,10 +1312,10 @@ def cmd_import(filepath: str, fmt: str = "auto", dry_run: bool = False) -> None:
                 ok, err = _insert_entry(entry_path, format_entry(data))
                 if ok:
                     imported += 1
-                    console.print(f"  [green]✓[/green] {entry_path}")
+                    console.print(f"  [green]✓[/green] {escape(entry_path)}")
                 else:
                     skipped += 1
-                    console.print(f"  [red]✗[/red] {entry_path}: {err}")
+                    console.print(f"  [red]✗[/red] {escape(entry_path)}: {escape(err)}")
 
     except (csv.Error, UnicodeDecodeError) as e:
         _error(f"Failed to parse CSV: {e}")
@@ -1540,6 +1546,19 @@ def cmd_export_vault(output_path: str) -> None:
     if not passphrase:
         console.print("[red]Passphrase cannot be empty.[/red]")
         return
+    # An attacker who has the vault file brute-forces it offline — PBKDF2
+    # cannot save a tiny keyspace, so enforce a floor and warn on weak.
+    if len(passphrase) < 12:
+        _error(
+            "Vault passphrase must be at least 12 characters.",
+            "Short passphrases can be brute-forced offline regardless of encryption.",
+        )
+        return
+    score, label, _color = password_strength(passphrase)
+    if score <= 1:
+        console.print(f"[yellow]Warning: this passphrase is rated '{label}'.[/yellow]")
+        if not Confirm.ask("Use it anyway?", default=False):
+            return
     confirm = Prompt.ask("Confirm passphrase", password=True)
     # Compare bytes: compare_digest raises TypeError on non-ASCII str operands
     if not hmac.compare_digest(passphrase.encode("utf-8"), confirm.encode("utf-8")):
@@ -1709,30 +1728,51 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
                 # outside the extraction root even after path validation
                 if member.issym() or member.islnk():
                     _error(
-                        f"Symlink/hardlink in vault: {member.name}",
+                        f"Symlink/hardlink in vault: {escape(member.name)}",
+                        "This vault file may be malicious. Import aborted.",
+                    )
+                    return
+                # Only regular files and directories belong in a vault —
+                # FIFOs/devices could hang or subvert later store reads
+                if not (member.isfile() or member.isdir()):
+                    _error(
+                        f"Unsupported member type in vault: {escape(member.name)}",
                         "This vault file may be malicious. Import aborted.",
                     )
                     return
                 # Reject absolute paths and null bytes
                 if member.name.startswith("/") or "\x00" in member.name:
                     _error(
-                        f"Unsafe path in vault: {member.name!r}",
+                        f"Unsafe path in vault: {escape(member.name)}",
                         "This vault file may be malicious. Import aborted.",
                     )
                     return
-                # Robust containment check — is_relative_to is not fooled
-                # by string prefix overlaps (e.g. .password-store2/)
+                # Archives name their top folder '.password-store' (the export
+                # default); remap it to the configured store's directory name
+                # so restores land in the store the user actually uses.
+                parts = Path(member.name).parts
+                if parts and parts[0] == ".password-store":
+                    member.name = str(Path(pass_dir.name, *parts[1:]))
+                # Robust containment check on the actual extraction target —
+                # is_relative_to is not fooled by string prefix overlaps
+                # (e.g. .password-store2/)
                 target = (extract_root / member.name).resolve()
                 if not target.is_relative_to(extract_root):
                     _error(
-                        f"Path traversal detected in vault: {member.name}",
+                        f"Path traversal detected in vault: {escape(member.name)}",
                         "This vault file may be malicious. Import aborted.",
                     )
                     return
+                # Strip setuid/setgid/sticky and group/other-write bits —
+                # tarfile applies member.mode via chmod, bypassing umask
+                member.mode &= 0o755
                 safe_members.append(member)
-            if sys.version_info >= (3, 12):
+            # filter='data' strips dangerous metadata as defense in depth.
+            # Gate on capability, not version — PEP 706 backported filter=
+            # to 3.10.12+ and 3.11.4+.
+            try:
                 tar.extractall(extract_root, members=safe_members, filter="data")
-            else:
+            except TypeError:
                 tar.extractall(extract_root, members=safe_members)
 
     restored = len(list(pass_dir.rglob("*.gpg")))
@@ -2115,13 +2155,13 @@ class PassShell(cmd.Cmd):
         """ls [path]  List all entries."""
         cmd_args = ["pass", "ls"] + ([arg.strip()] if arg.strip() else [])
         out, err, rc = run_command(cmd_args)
-        console.print(out if rc == 0 else f"[red]{err}[/red]")
+        console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
 
     def do_find(self, arg: str) -> None:
         """find <term>  Search entries by name, then optionally act on a result."""
         term = arg.strip() or Prompt.ask("Search term")
         out, err, rc = run_command(["pass", "find", term])
-        console.print(out if rc == 0 else f"[red]{err}[/red]")
+        console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
         if rc == 0:
             matches = [e for e in get_all_entries() if term.lower() in e.lower()]
             if matches:
@@ -2661,7 +2701,7 @@ def main() -> None:
 
     elif args.command == "find":
         out, err, rc = run_command(["pass", "find", args.term])
-        console.print(out if rc == 0 else f"[red]{err}[/red]")
+        console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
         if rc == 0:
             matches = [e for e in get_all_entries() if args.term.lower() in e.lower()]
             if matches:
@@ -2672,7 +2712,7 @@ def main() -> None:
     elif args.command == "ls":
         cmd_args = ["pass", "ls"] + ([args.path] if args.path else [])
         out, err, rc = run_command(cmd_args)
-        console.print(out if rc == 0 else f"[red]{err}[/red]")
+        console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
 
     elif args.command == "mv":
         ok, err_msg = validate_entry_name(args.new)
