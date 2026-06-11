@@ -338,108 +338,123 @@ def fuzzy_select(entries: List[str], prompt_text: str = "Select entry") -> Optio
 # ---------------------------------------------------------------------------
 
 
-# Compare before clearing so we don't clobber unrelated clipboard content the
-# user may have copied after us. The comparison is done on UTF-8 bytes:
-# hmac.compare_digest raises TypeError on non-ASCII str operands, which would
-# silently skip the clear for non-ASCII secrets.
+# Native clipboard tools and their paired paste commands. The pairs let the
+# clearer verify clipboard content before wiping it, mirroring the pyperclip
+# path.
+_CLIPBOARD_TOOLS = {
+    "pbcopy":  {"copy": ["pbcopy"], "paste": ["pbpaste"]},
+    "xclip":   {"copy": ["xclip", "-selection", "clipboard"],
+                "paste": ["xclip", "-selection", "clipboard", "-o"]},
+    "wl-copy": {"copy": ["wl-copy"], "paste": ["wl-paste"]},
+}
+
+# Clear scripts run in a detached child. The secret arrives over stdin (never
+# argv or env — pipes do not show up in `ps` or /proc/<pid>/environ). The
+# comparison is done on UTF-8 bytes: hmac.compare_digest raises TypeError on
+# non-ASCII str operands, which would silently skip the clear.
 _PYPERCLIP_CLEAR_SCRIPT = (
-    "import hmac, os, time\n"
+    "import hmac, os, sys, time\n"
     "try:\n"
+    "    data = sys.stdin.buffer.read()\n"
     "    import pyperclip\n"
-    "    t = os.environ.get('_PASSCLIP_CLIP_TEXT', '')\n"
     "    s = int(os.environ.get('_PASSCLIP_CLIP_TIMEOUT', '45'))\n"
     "    time.sleep(s)\n"
-    "    cur = pyperclip.paste() or ''\n"
-    "    if hmac.compare_digest(cur.encode('utf-8', 'surrogatepass'),\n"
-    "                           t.encode('utf-8', 'surrogatepass')):\n"
+    "    cur = (pyperclip.paste() or '').encode('utf-8', 'surrogatepass')\n"
+    "    if hmac.compare_digest(cur, data):\n"
     "        pyperclip.copy('')\n"
     "except Exception:\n"
     "    pass\n"
 )
 
+# Native variant: verify via the paired paste tool. If the clipboard cannot
+# be read at all, clear anyway — failing safe for the secret.
+_NATIVE_CLEAR_SCRIPT = (
+    "import hmac, os, subprocess, sys, time\n"
+    "data = sys.stdin.buffer.read()\n"
+    "s = int(os.environ.get('_PASSCLIP_CLIP_TIMEOUT', '45'))\n"
+    "time.sleep(s)\n"
+    "def clear():\n"
+    "    subprocess.run({copy_cmd!r}, input=b'', capture_output=True)\n"
+    "try:\n"
+    "    r = subprocess.run({paste_cmd!r}, capture_output=True, timeout=5)\n"
+    "    match = (hmac.compare_digest(r.stdout, data)\n"
+    "             or hmac.compare_digest(r.stdout.rstrip(b'\\n'), data))\n"
+    "    if r.returncode != 0 or match:\n"
+    "        clear()\n"
+    "except Exception:\n"
+    "    clear()\n"
+)
 
-def _spawn_clipboard_clear(text: str, timeout: int) -> None:
+
+def _spawn_clipboard_clear(text: str, timeout: int, mechanism: str) -> None:
     """Spawn a detached process that clears the clipboard after `timeout` seconds.
 
     A daemon thread would be killed the instant the CLI process exits after
     copying.  This subprocess uses start_new_session=True so it survives the
-    parent process.  The sensitive text is passed via an environment variable,
-    never as a command-line argument, so it does not appear in `ps` output.
+    parent process.  The sensitive text is handed to the child over a stdin
+    pipe — unlike argv or environment variables, pipes are not visible in
+    `ps` output or /proc/<pid>/environ.
+
+    `mechanism` is how the copy actually happened ("pyperclip" or a native
+    tool name), so the clearer verifies through the same channel instead of
+    guessing from what is importable.
     """
-    env = os.environ.copy()
-    env["_PASSCLIP_CLIP_TEXT"] = text
-    env["_PASSCLIP_CLIP_TIMEOUT"] = str(timeout)
-
-    if DEPS.get("pyperclip"):
+    if mechanism == "pyperclip":
         script = _PYPERCLIP_CLEAR_SCRIPT
-        try:
-            subprocess.Popen(
-                [sys.executable, "-c", script],
-                env=env,
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-            )
+    else:
+        tools = _CLIPBOARD_TOOLS.get(mechanism)
+        if not tools:
             return
-        except (FileNotFoundError, OSError):
-            pass
+        script = _NATIVE_CLEAR_SCRIPT.format(
+            copy_cmd=tools["copy"], paste_cmd=tools["paste"]
+        )
 
-    # Native-tool fallback: unconditional clear after timeout.
-    # (No paste-check possible without pyperclip.)
-    # Uses sleep + pipe without bash -c to avoid shell format strings.
-    safe_timeout = str(int(timeout))
-    clear_cmds = [
-        ("pbcopy",  ["pbcopy"]),
-        ("xclip",   ["xclip", "-selection", "clipboard"]),
-        ("wl-copy", ["wl-copy"]),
-    ]
-    for tool, pipe_cmd in clear_cmds:
-        if shutil.which(tool):
-            try:
-                # sleep in a detached Python one-liner; avoids bash -c entirely
-                script = (
-                    f"import subprocess, time; time.sleep({safe_timeout}); "
-                    f"subprocess.run({pipe_cmd!r}, input='', text=True, "
-                    "capture_output=True)"
-                )
-                subprocess.Popen(
-                    [sys.executable, "-c", script],
-                    start_new_session=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    close_fds=True,
-                )
-            except (FileNotFoundError, OSError):
-                pass
-            return
+    env = os.environ.copy()
+    env["_PASSCLIP_CLIP_TIMEOUT"] = str(int(timeout))
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+    except (FileNotFoundError, OSError):
+        return
+    try:
+        proc.stdin.write(text.encode("utf-8", "surrogatepass"))
+        proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass
 
 
 def copy_to_clipboard(text: str, timeout: Optional[int] = None) -> bool:
     """Copy text to clipboard and schedule auto-clear after `timeout` seconds."""
     timeout = timeout if timeout is not None else CONFIG.get("clip_timeout", 45)
-    copied = False
+    mechanism: Optional[str] = None
 
     if DEPS.get("pyperclip"):
         import pyperclip
         try:
             pyperclip.copy(text)
-            copied = True
+            mechanism = "pyperclip"
         except (OSError, RuntimeError):
             pass
 
-    if not copied:
-        for cmd_args in [["pbcopy"], ["xclip", "-selection", "clipboard"], ["wl-copy"]]:
-            if shutil.which(cmd_args[0]):
+    if mechanism is None:
+        for tool, cmds in _CLIPBOARD_TOOLS.items():
+            if shutil.which(tool):
                 try:
-                    subprocess.run(cmd_args, input=text, text=True, check=True,
+                    subprocess.run(cmds["copy"], input=text, text=True, check=True,
                                    capture_output=True)
-                    copied = True
+                    mechanism = tool
                     break
                 except (FileNotFoundError, subprocess.SubprocessError):
                     continue
 
-    if not copied:
+    if mechanism is None:
         console.print(
             "[red]No clipboard tool found.[/red] "
             "Install pyperclip: [cyan]pip install pyperclip[/cyan]"
@@ -451,7 +466,7 @@ def copy_to_clipboard(text: str, timeout: Optional[int] = None) -> bool:
         f"Auto-clearing in [bold]{timeout}s[/bold]..."
     )
 
-    _spawn_clipboard_clear(text, timeout)
+    _spawn_clipboard_clear(text, timeout, mechanism)
     return True
 
 

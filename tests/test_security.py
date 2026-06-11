@@ -88,12 +88,12 @@ def _run_clear_script(tmp_path, clipboard_now, copied_text):
         **os.environ,
         "PYTHONPATH": str(tmp_path),
         "FAKE_CLIP_STATE": str(state),
-        "_PASSCLIP_CLIP_TEXT": copied_text,
         "_PASSCLIP_CLIP_TIMEOUT": "0",
     }
     subprocess.run(
         [sys.executable, "-c", passclip._PYPERCLIP_CLEAR_SCRIPT],
         env=env, timeout=30, check=True,
+        input=copied_text.encode("utf-8"),  # the secret travels over stdin
     )
     return state.read_text(encoding="utf-8")
 
