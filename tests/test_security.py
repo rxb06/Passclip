@@ -143,7 +143,7 @@ def test_export_vault_non_ascii_passphrase(tmp_path):
     (store / "entry.gpg").write_text("ciphertext")
     out_file = tmp_path / "backup.vault"
     with patch.dict("passclip.CONFIG", {"pass_dir": str(store)}), \
-            patch("passclip.Prompt.ask", side_effect=["pässwörd!", "pässwörd!"]):
+            patch("passclip.Prompt.ask", side_effect=["pässwörd!123", "pässwörd!123"]):
         cmd_export_vault(str(out_file))
     assert out_file.exists()
     assert out_file.read_bytes()[:4] == b"PCV2"
