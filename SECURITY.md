@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 1.2.x | Yes |
-| < 1.2 | No |
+| 1.4.x | Yes |
+| < 1.4 | No |
 
 We only support the latest release. If you're running an older version, please update before reporting issues.
 
