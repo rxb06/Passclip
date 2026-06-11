@@ -12,7 +12,7 @@ dynamic = ["version"]
 description = "Security-focused CLI for managing secrets in GPG-backed environments. Extends pass with TOTP, AES-256-GCM backups, secure clipboard handling, and runtime secret injection."
 readme = "README.md"
 license = "GPL-3.0-only"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     { name = "Rutvik" },
 ]
@@ -34,7 +34,6 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -42,15 +41,15 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "rich>=13.0",
-    "cryptography>=46.0.7",  # floor = current patched line; no upper bound by policy
+    "rich>=15.0",
+    "cryptography>=48.0.1",  # floor = current line; no upper bound by policy
 ]
 
 [project.optional-dependencies]
-clipboard = ["pyperclip>=1.8"]
-otp = ["pyotp>=2.8"]
-all = ["pyperclip>=1.8", "pyotp>=2.8"]
-dev = ["pytest>=8.0", "ruff>=0.5"]
+clipboard = ["pyperclip>=1.11"]
+otp = ["pyotp>=2.9"]
+all = ["pyperclip>=1.11", "pyotp>=2.9"]
+dev = ["pytest>=9.0", "ruff>=0.15"]
 
 [project.scripts]
 passclip = "passclip:main"
@@ -73,10 +72,10 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
 # E/F/W/I: errors, pyflakes, warnings, import order. UP: modern syntax for the
-# py310 floor. B: bugbear (real bug patterns). SIM: simplifications.
+# py311 floor. B: bugbear (real bug patterns). SIM: simplifications.
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]

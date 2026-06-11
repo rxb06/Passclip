@@ -28,7 +28,7 @@ Shell shortcuts (inside the interactive shell):
   o gmail                           # Copy OTP code (fuzzy)
 """
 
-__version__ = "1.4.0"
+__version__ = "1.3.0"
 
 import argparse
 import cmd
@@ -928,8 +928,9 @@ def cmd_generate(
         if clip:
             copy_to_clipboard(pw)
         else:
-            # escape: generated passwords can contain '[' and ']'
-            console.print(f"  Password: {escape(pw)}")
+            # escape: generated passwords can contain '[' and ']'. Shows the
+            # just-generated password to the user (not a stored credential).
+            console.print(f"  Password: {escape(pw)}")  # credactor:ignore
         console.print(f"  Strength: {strength_bar(score, color)} [dim]{label}[/dim]")
 
 

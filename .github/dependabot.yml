@@ -2,9 +2,13 @@ version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
+    # Open bumps against the integration branch, not the default (main):
+    # all changes flow through develop and are promoted to main on release.
+    target-branch: develop
     schedule:
       interval: weekly
   - package-ecosystem: pip
     directory: /
+    target-branch: develop
     schedule:
       interval: weekly
