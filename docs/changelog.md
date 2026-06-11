@@ -6,6 +6,58 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ---
 
+## [1.4.0] — 2026-06-11
+
+The remediation release: every finding from the June 2026 security review and code-quality review, fixed across nine phases. **Support for all versions before 1.4 ends with this release** — upgrade unconditionally.
+
+### Fixed — correctness
+
+- **Vault restore with a custom `pass_dir`** extracted into a parallel `~/.password-store`, left the real store untouched, and reported success with "0 passwords restored". The archive's top folder is now remapped to the configured store name before extraction.
+- **CSV import crashed mid-file** (`AttributeError`) on rows with fewer cells than the header — common after a file is re-saved by Excel.
+- **`import --dry-run` never flagged conflicts** — the existing-entries set was only computed when *not* in dry-run, so the `(exists)` overwrite preview was dead code.
+- **Wrong-magic vault error said `PCV1` is expected** (the format is `PCV2`) — actively misleading in the exact migration scenario it appears in; also fixed in `docs/user-guide.md`.
+- **`otp` hint printed a literal `{entry}`** (missing f-string prefix).
+- **Passwords with leading/trailing whitespace were corrupted on read** — `pass show` output was blanket-stripped; now only the trailing newline is removed.
+
+### Fixed — security (defense in depth)
+
+- **TOTP seeds and entry metadata no longer persist to readline history** — OTP prompts are hidden (getpass bypasses readline) and the insert flow's metadata prompts are excluded from history.
+- **Non-ASCII secrets are actually auto-cleared** — the clipboard comparison ran on `str` and raised a swallowed `TypeError`, leaving e.g. `pässwörd` on the clipboard forever; comparisons are now on UTF-8 bytes.
+- **The clipboard clear child no longer holds the secret in its environment** — it arrives over a stdin pipe, invisible to `ps` and `/proc/<pid>/environ`.
+- **The clearer now matches how the copy actually happened** — a pyperclip that imports but has no backend no longer results in a clear that silently never fires; the native fallback verifies clipboard content before wiping (and fails safe when it cannot read).
+- **`generate --clip` no longer prints the new password** to the terminal.
+- **Vault tar extraction** rejects FIFOs/devices, clamps member modes to `0o755` (no setuid/world-write), and applies `filter='data'` whenever the runtime supports it (including the 3.10.12+/3.11.4+ backports).
+- **Vault passphrases require ≥12 characters**, with confirmation on weak ones; the pointless backoff sleeps were removed (PBKDF2-600k is the real rate limit).
+- **Rich markup injection closed**: untrusted strings (CSV names, tar member names, git/`pass` output) and stored values render literally — a password like `p[/]w` used to crash `get` with `MarkupError`. `get --field` writes raw bytes for scripting.
+- **Planted flag-like entry names** (`-x.gpg`) are excluded from enumeration and typed flag-like names are rejected before reaching `pass` argv.
+- **Config/backup/history directories are `0700`**; the lock file can no longer be deleted by a session that doesn't hold the lock; the documented chmod-000 history-disable recipe no longer crashes the shell.
+
+### Changed — behavior
+
+- **Ctrl-C behaves**: cancels the current shell command and returns to the prompt; exits gracefully at the prompt; exit code 130 on the CLI. (The old module-level handler made every `except KeyboardInterrupt` unreachable.)
+- **`insert` asks before overwriting** an existing entry instead of silently forcing.
+- **Entry names with spaces work in the shell** — all shell commands parse with shlex, so `get "web/my site"` and `run e -- echo "a b"` behave; unbalanced quotes fall back instead of crashing.
+- **`run` returns the child's exit code** (127 when not found) instead of exiting the whole shell; injected env-var names are sanitized to `[A-Z0-9_]`.
+- **`otp add` does a targeted line edit** — it no longer rewrites the entire entry file (which lowercased keys and reordered lines).
+- **`restore` accepts names as `ls` shows them** (`archive/...`); `archive` refuses to double-archive; the shell accepts `otp --add`; flag-first quick copy (`passclip -u gmail`) works; unknown flags error instead of silently copying the password.
+- **Removed** the `default_mode` config key — it was validated and documented but never read by any code path.
+
+### Changed — internals & supply chain
+
+- Nine commands that existed twice (shell + CLI; delete three times) now share one implementation each; the CLI command list is derived from the parser, so new subcommands can't silently fall through to fuzzy search.
+- Version is single-sourced from `passclip.__version__`; `requirements.txt` (an unreferenced, drifted copy of the dependency list) is gone.
+- Build backend pinned and hashed; all builds run `--no-isolation`; the artifact audit content-hashes `passclip.py` in both wheel and sdist against the repo and fails on empty `dist/`.
+- CI: least-privilege permissions, `persist-credentials: false`, all actions SHA-pinned (including the publish action), Node-24-ready action versions, pip-audit installed from the hashed lockfile, Dependabot enabled, `cryptography` floor raised to ≥46.0.7, runs on `develop` too.
+- The PyPI `pypi` environment now requires reviewer approval before publishing.
+- Tooling: ruff rules expanded (`UP`, `B`, `SIM`), modern typing syntax throughout, one-time `ruff format` with format checking in CI, ruff pre-commit hooks, lint scope unified between Makefile and CI.
+- Importing the module is side-effect-free: user config loads in `main()`, not at import.
+
+### Tests
+
+- Suite grew from 79 to 179 tests: real vault export→import roundtrips (including crafted malicious vaults), CSV import end-to-end, smart-copy routing, `main()` dispatch, clipboard clear-script execution against fakes, shell parsing, behavior pins for every deduplicated command, and markup-injection regressions.
+
+---
+
 ## [1.2.1] — 2026-04-09
 
 ### Fixed
@@ -118,6 +170,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 - PyPI, CI, license, and Python version badges in README.
 - `uv.lock` added to `.gitignore`.
+
+---
+
+## [1.1.1] — 2026-03-21
+
+Version bump released the same day as 1.1.2; its changes (the credactor false-positive fix, the Python 3.8/3.9 drop, README badges) are documented under [1.1.2], which superseded it within hours.
 
 ---
 

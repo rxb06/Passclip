@@ -1,15 +1,12 @@
 """Tests for entry name validation and input sanitization."""
 
-
 from passclip import validate_entry_name
 
 
 def _is_valid(name: str) -> bool:
-    """Helper — validate_entry_name returns (bool, msg) or just bool depending on version."""
-    result = validate_entry_name(name)
-    if isinstance(result, tuple):
-        return result[0]
-    return bool(result)
+    """Helper — unwrap the (ok, error_message) tuple from validate_entry_name."""
+    ok, _ = validate_entry_name(name)
+    return ok
 
 
 class TestValidateEntryName:

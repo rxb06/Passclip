@@ -23,7 +23,7 @@ brew install gnupg pass          # macOS
 sudo apt install gnupg2 pass     # Ubuntu/Debian
 
 # Passclip
-pip install passclip[all]
+pip install "passclip[all]"
 
 # First-time setup
 passclip wizard
@@ -82,7 +82,7 @@ But `pass` is intentionally minimal, and that minimalism has real gaps in daily 
 |---|---|
 | No structured entries | First line is the password, everything else is `key: value` pairs. Compatible with `pass-import`. |
 | Clipboard `--clip` is inconsistent cross-platform | Reliable auto-clear with a configurable timer. Checks clipboard content before clearing. |
-| No strength feedback | Visual strength bar, entropy estimate, actionable tips. |
+| No strength feedback | Visual strength bar, rule-based strength score, actionable tips. |
 | No health audit | `passclip health` scans every entry — flags weak passwords and duplicates. |
 | TOTP needs an extension | Built in. `passclip otp --add` to set up, `passclip gmail -o` to copy a code. |
 | Importing is painful | `passclip import file.csv` — auto-detects Bitwarden, LastPass, 1Password. |
@@ -201,9 +201,11 @@ passclip import export.csv --dry-run  # preview before committing
 | `gitlog [n]` | Recent git history |
 | `config [key] [value]` | View or change settings |
 | `wizard` | First-time setup |
-| `init` | Init or re-init the password store |
-| `gpg_gen` | Generate a new GPG key |
-| `gpg_list` | List GPG keys |
+| `init` *(shell only)* | Init or re-init the password store |
+| `gpg_gen` *(shell only)* | Generate a new GPG key |
+| `gpg_list` *(shell only)* | List GPG keys |
+
+*(shell only)* commands are available inside the interactive shell (`passclip`), not as direct CLI subcommands.
 
 ---
 

@@ -26,7 +26,7 @@ Already have `pass` and GPG? Here's the fast track:
 
 ```bash
 # Install from PyPI
-pip install passclip[all]
+pip install "passclip[all]"
 
 # Run the setup wizard (handles GPG key + store init)
 passclip wizard
@@ -87,7 +87,7 @@ sudo pacman -S fzf xclip
 Passclip needs Python 3.10 or later. Install via pip:
 
 ```bash
-pip install passclip[all]
+pip install "passclip[all]"
 ```
 
 Or install individual extras:
@@ -105,7 +105,7 @@ pip install passclip[otp]         # + pyotp
 | `pyperclip` | Recommended | Clipboard copy with auto-clear |
 | `pyotp` | Optional | TOTP / OTP code generation |
 
-If you don't install `pyperclip`, everything still works — you just won't be able to copy to clipboard. If you don't install `pyotp`, the `otp` command (both generating codes and adding secrets) won't be available, and the OTP prompt during `insert` will be skipped.
+If you don't install `pyperclip`, clipboard copy still works when a native tool is available (`pbcopy` on macOS, `xclip` or `wl-copy` on Linux) — Passclip falls back to it automatically. If you don't install `pyotp`, the `otp` command (both generating codes and adding secrets) won't be available, and the OTP prompt during `insert` will be skipped.
 
 ---
 
@@ -170,7 +170,7 @@ Your password store lives at `~/.password-store/` by default. Every entry is a G
 The recommended way is via pip:
 
 ```bash
-pip install passclip[all]
+pip install "passclip[all]"
 ```
 
 This installs the `passclip` command globally. Verify:
@@ -193,7 +193,7 @@ pip install -e ".[all]"
 
 ## Making it a global command
 
-After `pip install passclip[all]`, the `passclip` binary is placed in pip's scripts directory. Whether it's immediately available depends on whether that directory is in your `PATH`.
+After `pip install "passclip[all]"`, the `passclip` binary is placed in pip's scripts directory. Whether it's immediately available depends on whether that directory is in your `PATH`.
 
 ### Verify it worked
 
@@ -261,7 +261,7 @@ This is the cleanest option if you want Passclip available everywhere without to
 
 ## Shell completions
 
-Tab completion makes a huge difference when you have dozens of entries. We ship completion scripts for bash, zsh, and fish.
+Tab completion makes a huge difference when you have dozens of entries. Completion scripts for bash, zsh, and fish live in the repo's [`completions/`](https://github.com/rxb06/Passclip/tree/main/completions) directory — they are **not** included in the pip package, so download them from GitHub (or clone the repo) first.
 
 ### Bash
 
@@ -316,10 +316,9 @@ passclip config default_password_length 24
 |---|---|---|
 | `clip_timeout` | `45` | Seconds before clipboard is auto-cleared (minimum: 1) |
 | `default_password_length` | `20` | Default length for generated passwords (minimum: 8) |
-| `default_mode` | `shell` | What happens when you run `passclip` with no args (`shell` or `ls`) |
 | `pass_dir` | `~/.password-store` | Path to your password store |
 
-Invalid values are automatically reset to defaults on load. For example, setting `clip_timeout` to `0` or a negative number resets it to `45`. Setting `default_password_length` below `8` resets it to `20`. Setting `default_mode` to anything other than `shell` or `ls` resets it to `shell`.
+Invalid values are automatically reset to defaults on load. For example, setting `clip_timeout` to `0` or a negative number resets it to `45`. Setting `default_password_length` below `8` resets it to `20`.
 
 ### Changing the password store location
 

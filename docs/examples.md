@@ -177,7 +177,7 @@ Single-letter shortcuts (`c`, `u`, `o`) do fuzzy matching — you rarely need to
 **If you have a vault backup:**
 
 ```bash
-pip install passclip[all]
+pip install "passclip[all]"
 passclip wizard               # sets up GPG key + store
 passclip import-vault ~/backup.vault
 ```
@@ -185,7 +185,7 @@ passclip import-vault ~/backup.vault
 **If you have a git-synced store:**
 
 ```bash
-pip install passclip[all]
+pip install "passclip[all]"
 git clone git@github.com:you/your-pass-store.git ~/.password-store
 # import your GPG key from the old machine first
 passclip ls                   # verify everything works
