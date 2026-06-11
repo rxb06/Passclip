@@ -53,40 +53,49 @@ class TestSecretDisplayEscaping:
 class TestCmdDelete:
     def test_backs_up_before_deleting(self):
         manager = []
-        with patch("passclip._preview_entry_metadata"), \
-                patch("passclip.Confirm.ask", return_value=True), \
-                patch("passclip._backup_entry",
-                      side_effect=lambda e: manager.append("backup") or None), \
-                patch("passclip.run_command",
-                      side_effect=lambda *a, **k: manager.append("rm") or ("", "", 0)):
+        with (
+            patch("passclip._preview_entry_metadata"),
+            patch("passclip.Confirm.ask", return_value=True),
+            patch("passclip._backup_entry", side_effect=lambda e: manager.append("backup") or None),
+            patch(
+                "passclip.run_command",
+                side_effect=lambda *a, **k: manager.append("rm") or ("", "", 0),
+            ),
+        ):
             cmd_delete("web/test")
         assert manager == ["backup", "rm"], "backup must happen before pass rm"
 
     def test_force_skips_preview_and_confirm(self):
-        with patch("passclip._preview_entry_metadata") as preview, \
-                patch("passclip.Confirm.ask") as confirm, \
-                patch("passclip._backup_entry", return_value=None), \
-                patch("passclip.run_command", return_value=("", "", 0)) as run:
+        with (
+            patch("passclip._preview_entry_metadata") as preview,
+            patch("passclip.Confirm.ask") as confirm,
+            patch("passclip._backup_entry", return_value=None),
+            patch("passclip.run_command", return_value=("", "", 0)) as run,
+        ):
             cmd_delete("web/test", force=True)
         preview.assert_not_called()
         confirm.assert_not_called()
         run.assert_called_once_with(["pass", "rm", "-r", "-f", "web/test"])
 
     def test_declined_confirm_deletes_nothing(self):
-        with patch("passclip._preview_entry_metadata"), \
-                patch("passclip.Confirm.ask", return_value=False), \
-                patch("passclip._backup_entry") as backup, \
-                patch("passclip.run_command") as run:
+        with (
+            patch("passclip._preview_entry_metadata"),
+            patch("passclip.Confirm.ask", return_value=False),
+            patch("passclip._backup_entry") as backup,
+            patch("passclip.run_command") as run,
+        ):
             cmd_delete("web/test")
         backup.assert_not_called()
         run.assert_not_called()
 
 
 def test_cmd_find_offers_action_menu():
-    with patch("passclip.run_command", return_value=("hit", "", 0)), \
-            patch("passclip.get_all_entries", return_value=["email/gmail"]), \
-            patch("passclip.fuzzy_select", return_value="email/gmail"), \
-            patch("passclip._entry_action_menu") as menu:
+    with (
+        patch("passclip.run_command", return_value=("hit", "", 0)),
+        patch("passclip.get_all_entries", return_value=["email/gmail"]),
+        patch("passclip.fuzzy_select", return_value="email/gmail"),
+        patch("passclip._entry_action_menu") as menu,
+    ):
         cmd_find("gmail")
     menu.assert_called_once_with("email/gmail")
 
@@ -96,8 +105,13 @@ class TestBothFrontendsShareImplementations:
 
     CASES = [
         # (shell line, cli argv, patched cmd, expected call)
-        ("do_delete", "web/x", ["delete", "web/x", "--force"],
-         "cmd_delete", call("web/x", force=True)),
+        (
+            "do_delete",
+            "web/x",
+            ["delete", "web/x", "--force"],
+            "cmd_delete",
+            call("web/x", force=True),
+        ),
         ("do_ls", "web", ["ls", "web"], "cmd_ls", call("web")),
         ("do_find", "gmail", ["find", "gmail"], "cmd_find", call("gmail")),
         ("do_mv", "a b", ["mv", "a", "b"], "cmd_mv", call("a", "b")),
@@ -107,16 +121,16 @@ class TestBothFrontendsShareImplementations:
         ("do_edit", "web/x", ["edit", "web/x"], "cmd_edit", call("web/x")),
     ]
 
-    @pytest.mark.parametrize("method,arg,argv,cmd,expected",
-                             CASES, ids=[c[0] for c in CASES])
+    @pytest.mark.parametrize("method,arg,argv,cmd,expected", CASES, ids=[c[0] for c in CASES])
     def test_shell_wrapper_delegates(self, method, arg, argv, cmd, expected):
         with patch(f"passclip.{cmd}") as target:
             getattr(_shell(), method)(arg)
         shell_args = target.call_args
         assert shell_args is not None, f"{method} must delegate to {cmd}"
 
-    @pytest.mark.parametrize("method,arg,argv,cmd,expected",
-                             CASES, ids=[c[3] + "-cli" for c in CASES])
+    @pytest.mark.parametrize(
+        "method,arg,argv,cmd,expected", CASES, ids=[c[3] + "-cli" for c in CASES]
+    )
     def test_cli_dispatch_delegates(self, monkeypatch, method, arg, argv, cmd, expected):
         monkeypatch.setattr(sys, "argv", ["passclip"] + argv)
         with patch(f"passclip.{cmd}") as target:
@@ -141,8 +155,7 @@ def test_cli_config_empty_value_is_a_read_not_a_write(monkeypatch):
 class TestKnownCommands:
     def test_parser_returns_command_set(self):
         _parser, known = build_parser()
-        for name in ("get", "insert", "run", "export-vault", "import-vault",
-                     "config", "shell"):
+        for name in ("get", "insert", "run", "export-vault", "import-vault", "config", "shell"):
             assert name in known
 
     def test_unknown_first_arg_goes_to_smart_copy(self, monkeypatch):
@@ -160,20 +173,26 @@ class TestKnownCommands:
 class TestCopyUsername:
     def test_username_preferred(self):
         content = "pw\nusername: alice\nemail: a@b.com\n"
-        with patch("passclip.get_entry_raw", return_value=(content, None)), \
-                patch("passclip.copy_to_clipboard") as cp:
+        with (
+            patch("passclip.get_entry_raw", return_value=(content, None)),
+            patch("passclip.copy_to_clipboard") as cp,
+        ):
             _copy_username("e")
         cp.assert_called_once_with("alice")
 
     def test_falls_back_to_email(self):
-        with patch("passclip.get_entry_raw", return_value=("pw\nemail: a@b.com\n", None)), \
-                patch("passclip.copy_to_clipboard") as cp:
+        with (
+            patch("passclip.get_entry_raw", return_value=("pw\nemail: a@b.com\n", None)),
+            patch("passclip.copy_to_clipboard") as cp,
+        ):
             _copy_username("e")
         cp.assert_called_once_with("a@b.com")
 
     def test_nothing_to_copy_warns(self, capsys):
-        with patch("passclip.get_entry_raw", return_value=("pw", None)), \
-                patch("passclip.copy_to_clipboard") as cp:
+        with (
+            patch("passclip.get_entry_raw", return_value=("pw", None)),
+            patch("passclip.copy_to_clipboard") as cp,
+        ):
             _copy_username("e")
         cp.assert_not_called()
         assert "No username or email" in capsys.readouterr().out

@@ -6,7 +6,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "passclip"
-version = "1.2.1"
+# Version is single-sourced from __version__ in passclip.py (see
+# [tool.setuptools.dynamic]) so `passclip --version` and PyPI can never drift.
+dynamic = ["version"]
 description = "Security-focused CLI for managing secrets in GPG-backed environments. Extends pass with TOTP, AES-256-GCM backups, secure clipboard handling, and runtime secret injection."
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -63,6 +65,9 @@ Changelog = "https://github.com/rxb06/Passclip/blob/main/docs/changelog.md"
 [tool.setuptools]
 py-modules = ["passclip"]
 
+[tool.setuptools.dynamic]
+version = {attr = "passclip.__version__"}
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
@@ -72,4 +77,6 @@ target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
+# E/F/W/I: errors, pyflakes, warnings, import order. UP: modern syntax for the
+# py310 floor. B: bugbear (real bug patterns). SIM: simplifications.
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]

@@ -14,9 +14,7 @@ import passclip
 from passclip import _spawn_clipboard_clear, copy_to_clipboard
 
 PASTE_HELPER = (
-    "import sys\n"
-    "with open(sys.argv[1], 'rb') as f:\n"
-    "    sys.stdout.buffer.write(f.read())\n"
+    "import sys\nwith open(sys.argv[1], 'rb') as f:\n    sys.stdout.buffer.write(f.read())\n"
 )
 COPY_HELPER = (
     "import sys\n"
@@ -42,7 +40,8 @@ def _run_native_clear(tmp_path, clipboard_now, copied_text, paste_target=None):
         [sys.executable, "-c", script],
         env={"_PASSCLIP_CLIP_TIMEOUT": "0"},
         input=copied_text.encode("utf-8"),
-        timeout=30, check=True,
+        timeout=30,
+        check=True,
     )
     return state.read_bytes()
 
@@ -60,14 +59,12 @@ class TestNativeClearScript:
         assert _run_native_clear(tmp_path, "pässwörd".encode(), "pässwörd") == b""
 
     def test_unrelated_content_is_preserved(self, tmp_path):
-        assert _run_native_clear(tmp_path, b"user copied this", "hunter2") \
-            == b"user copied this"
+        assert _run_native_clear(tmp_path, b"user copied this", "hunter2") == b"user copied this"
 
     def test_unreadable_clipboard_clears_fail_safe(self, tmp_path):
         """If the paste tool fails, clear anyway — fail safe for the secret."""
         missing = tmp_path / "does-not-exist"
-        assert _run_native_clear(tmp_path, b"whatever", "hunter2",
-                                 paste_target=missing) == b""
+        assert _run_native_clear(tmp_path, b"whatever", "hunter2", paste_target=missing) == b""
 
 
 class TestSpawnTransport:
@@ -95,12 +92,16 @@ class TestMechanismKeying:
     def test_broken_pyperclip_backend_falls_back_to_native_clear(self):
         fake = types.ModuleType("pyperclip")
         fake.copy = lambda text: (_ for _ in ()).throw(RuntimeError("no backend"))
-        with patch.dict(sys.modules, {"pyperclip": fake}), \
-                patch.dict("passclip.DEPS", {"pyperclip": True}), \
-                patch("passclip.shutil.which",
-                      side_effect=lambda t: "/usr/bin/x" if t == "pbcopy" else None), \
-                patch("passclip.subprocess.run"), \
-                patch("passclip._spawn_clipboard_clear") as spawn:
+        with (
+            patch.dict(sys.modules, {"pyperclip": fake}),
+            patch.dict("passclip.DEPS", {"pyperclip": True}),
+            patch(
+                "passclip.shutil.which",
+                side_effect=lambda t: "/usr/bin/x" if t == "pbcopy" else None,
+            ),
+            patch("passclip.subprocess.run"),
+            patch("passclip._spawn_clipboard_clear") as spawn,
+        ):
             assert copy_to_clipboard("s3cret", timeout=1) is True
         spawn.assert_called_once()
         assert spawn.call_args.args[2] == "pbcopy"
@@ -108,16 +109,20 @@ class TestMechanismKeying:
     def test_working_pyperclip_uses_pyperclip_clear(self):
         fake = types.ModuleType("pyperclip")
         fake.copy = lambda text: None
-        with patch.dict(sys.modules, {"pyperclip": fake}), \
-                patch.dict("passclip.DEPS", {"pyperclip": True}), \
-                patch("passclip._spawn_clipboard_clear") as spawn:
+        with (
+            patch.dict(sys.modules, {"pyperclip": fake}),
+            patch.dict("passclip.DEPS", {"pyperclip": True}),
+            patch("passclip._spawn_clipboard_clear") as spawn,
+        ):
             assert copy_to_clipboard("s3cret", timeout=1) is True
         spawn.assert_called_once()
         assert spawn.call_args.args[2] == "pyperclip"
 
     def test_no_tool_at_all_reports_failure(self):
-        with patch.dict("passclip.DEPS", {"pyperclip": False}), \
-                patch("passclip.shutil.which", return_value=None), \
-                patch("passclip._spawn_clipboard_clear") as spawn:
+        with (
+            patch.dict("passclip.DEPS", {"pyperclip": False}),
+            patch("passclip.shutil.which", return_value=None),
+            patch("passclip._spawn_clipboard_clear") as spawn,
+        ):
             assert copy_to_clipboard("s3cret", timeout=1) is False
         spawn.assert_not_called()

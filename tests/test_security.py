@@ -32,22 +32,26 @@ class TestOtpPromptsHidden:
 
     def test_insert_otp_prompt_is_hidden(self):
         answers = ["Str0ngPass!x", "", "", "", "", ""]  # pw, user, email, url, notes, otp
-        with patch("passclip.Prompt.ask", side_effect=answers) as ask, \
-                patch.dict("passclip.DEPS", {"pyotp": True}), \
-                patch("passclip.get_all_entries", return_value=[]), \
-                patch("passclip._insert_entry", return_value=(True, "")):
+        with (
+            patch("passclip.Prompt.ask", side_effect=answers) as ask,
+            patch.dict("passclip.DEPS", {"pyotp": True}),
+            patch("passclip.get_all_entries", return_value=[]),
+            patch("passclip._insert_entry", return_value=(True, "")),
+        ):
             cmd_insert("web/test")
         otp_calls = [c for c in ask.call_args_list if "OTP secret" in str(c.args[0])]
         assert otp_calls, "expected an OTP secret prompt"
         assert otp_calls[0].kwargs.get("password") is True
 
     def test_otp_add_manual_prompt_is_hidden(self):
-        with patch("passclip.Prompt.ask", side_effect=[SEED]) as ask, \
-                patch.dict("passclip.DEPS", {"pyotp": True}), \
-                patch("passclip.get_entry_raw", return_value=("pw", None)), \
-                patch("passclip._read_clipboard", return_value=None), \
-                patch("passclip._insert_entry", return_value=(True, "")), \
-                patch("passclip.copy_to_clipboard"):
+        with (
+            patch("passclip.Prompt.ask", side_effect=[SEED]) as ask,
+            patch.dict("passclip.DEPS", {"pyotp": True}),
+            patch("passclip.get_entry_raw", return_value=("pw", None)),
+            patch("passclip._read_clipboard", return_value=None),
+            patch("passclip._insert_entry", return_value=(True, "")),
+            patch("passclip.copy_to_clipboard"),
+        ):
             cmd_otp_add("web/test")
         otp_calls = [c for c in ask.call_args_list if "OTP secret" in str(c.args[0])]
         assert otp_calls, "expected the manual OTP secret prompt"
@@ -56,11 +60,13 @@ class TestOtpPromptsHidden:
     def test_metadata_prompts_suppress_history(self):
         """username/email/url/notes prompts run with readline auto-history off."""
         answers = ["Str0ngPass!x", "alice", "", "", "", ""]
-        with patch("passclip.Prompt.ask", side_effect=answers), \
-                patch.dict("passclip.DEPS", {"pyotp": True}), \
-                patch("passclip.get_all_entries", return_value=[]), \
-                patch("passclip._insert_entry", return_value=(True, "")), \
-                patch("passclip.readline.set_auto_history") as sah:
+        with (
+            patch("passclip.Prompt.ask", side_effect=answers),
+            patch.dict("passclip.DEPS", {"pyotp": True}),
+            patch("passclip.get_all_entries", return_value=[]),
+            patch("passclip._insert_entry", return_value=(True, "")),
+            patch("passclip.readline.set_auto_history") as sah,
+        ):
             cmd_insert("web/test")
         called_with = [c.args[0] for c in sah.call_args_list]
         assert False in called_with and True in called_with
@@ -94,7 +100,9 @@ def _run_clear_script(tmp_path, clipboard_now, copied_text):
     }
     subprocess.run(
         [sys.executable, "-c", passclip._PYPERCLIP_CLEAR_SCRIPT],
-        env=env, timeout=30, check=True,
+        env=env,
+        timeout=30,
+        check=True,
         input=copied_text.encode("utf-8"),  # the secret travels over stdin
     )
     return state.read_text(encoding="utf-8")
@@ -118,17 +126,21 @@ class TestClipboardClearScript:
 
 class TestGenerateClip:
     def test_clip_does_not_print_password(self, capsys):
-        with patch("passclip.run_command", return_value=("", "", 0)), \
-                patch("passclip.get_entry_raw", return_value=("Sup3rSecretPw!", None)), \
-                patch("passclip.copy_to_clipboard") as cp:
+        with (
+            patch("passclip.run_command", return_value=("", "", 0)),
+            patch("passclip.get_entry_raw", return_value=("Sup3rSecretPw!", None)),
+            patch("passclip.copy_to_clipboard") as cp,
+        ):
             cmd_generate("web/test", 20, False, clip=True)
         assert "Sup3rSecretPw!" not in capsys.readouterr().out
         cp.assert_called_once_with("Sup3rSecretPw!")
 
     def test_without_clip_still_prints(self, capsys):
-        with patch("passclip.run_command", return_value=("", "", 0)), \
-                patch("passclip.get_entry_raw", return_value=("Sup3rSecretPw!", None)), \
-                patch("passclip.copy_to_clipboard") as cp:
+        with (
+            patch("passclip.run_command", return_value=("", "", 0)),
+            patch("passclip.get_entry_raw", return_value=("Sup3rSecretPw!", None)),
+            patch("passclip.copy_to_clipboard") as cp,
+        ):
             cmd_generate("web/test", 20, False, clip=False)
         assert "Sup3rSecretPw!" in capsys.readouterr().out
         cp.assert_not_called()
@@ -144,8 +156,10 @@ def test_export_vault_non_ascii_passphrase(tmp_path):
     store.mkdir()
     (store / "entry.gpg").write_text("ciphertext")
     out_file = tmp_path / "backup.vault"
-    with patch.dict("passclip.CONFIG", {"pass_dir": str(store)}), \
-            patch("passclip.Prompt.ask", side_effect=["pässwörd!123", "pässwörd!123"]):
+    with (
+        patch.dict("passclip.CONFIG", {"pass_dir": str(store)}),
+        patch("passclip.Prompt.ask", side_effect=["pässwörd!123", "pässwörd!123"]),
+    ):
         cmd_export_vault(str(out_file))
     assert out_file.exists()
     assert out_file.read_bytes()[:4] == b"PCV2"
@@ -220,11 +234,13 @@ def test_non_holder_release_keeps_lock(shell_env):
 
 def test_clipboard_otp_preview_redacted(capsys):
     seed = SEED + SEED  # 32-char base32 secret
-    with patch.dict("passclip.DEPS", {"pyotp": True}), \
-            patch("passclip.get_entry_raw", return_value=("pw", None)), \
-            patch("passclip._read_clipboard", return_value=seed), \
-            patch("passclip.Confirm.ask", return_value=True), \
-            patch("passclip._insert_entry", return_value=(True, "")), \
-            patch("passclip.copy_to_clipboard"):
+    with (
+        patch.dict("passclip.DEPS", {"pyotp": True}),
+        patch("passclip.get_entry_raw", return_value=("pw", None)),
+        patch("passclip._read_clipboard", return_value=seed),
+        patch("passclip.Confirm.ask", return_value=True),
+        patch("passclip._insert_entry", return_value=(True, "")),
+        patch("passclip.copy_to_clipboard"),
+    ):
         cmd_otp_add("web/test")
     assert seed not in capsys.readouterr().out

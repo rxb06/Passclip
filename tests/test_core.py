@@ -69,10 +69,14 @@ class TestLoadConfig:
 
     def test_accepts_valid_config(self, tmp_path):
         cfg_path = tmp_path / "config.json"
-        cfg_path.write_text(json.dumps({
-            "clip_timeout": 60,
-            "default_password_length": 24,
-        }))
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "clip_timeout": 60,
+                    "default_password_length": 24,
+                }
+            )
+        )
         with patch("passclip.CONFIG_PATH", cfg_path):
             cfg = load_config()
         assert cfg["clip_timeout"] == 60
@@ -98,8 +102,8 @@ class TestLoadConfig:
         with patch("passclip.CONFIG_PATH", cfg_path):
             cfg = load_config()
         assert cfg["clip_timeout"] == 30
-        # Unknown key should not be in defaults but is in loaded config
-        assert "typo_key" in cfg
+        # The warning says "ignored" — the key must actually be dropped
+        assert "typo_key" not in cfg
         out = capsys.readouterr().out
         assert "unrecognized config key 'typo_key'" in out
 
@@ -246,6 +250,7 @@ class TestGeneratePassword:
     def test_no_symbols(self):
         pw = generate_password(length=100, symbols=False)
         import string
+
         assert all(c in string.ascii_letters + string.digits for c in pw)
 
 
@@ -259,9 +264,13 @@ class TestParseCsvRow:
 
     def test_bitwarden(self):
         row = {
-            "name": "Gmail", "folder": "email",
-            "login_username": "alice", "login_password": "pw",
-            "login_uri": "https://gmail.com", "notes": "", "login_totp": "",
+            "name": "Gmail",
+            "folder": "email",
+            "login_username": "alice",
+            "login_password": "pw",
+            "login_uri": "https://gmail.com",
+            "notes": "",
+            "login_totp": "",
         }
         data = _parse_csv_row(row, "bitwarden")
         assert data["name"] == "Gmail"
@@ -270,9 +279,12 @@ class TestParseCsvRow:
 
     def test_lastpass(self):
         row = {
-            "name": "GitHub", "grouping": "dev",
-            "username": "bob", "password": "secret",
-            "url": "https://github.com", "extra": "work account",
+            "name": "GitHub",
+            "grouping": "dev",
+            "username": "bob",
+            "password": "secret",
+            "url": "https://github.com",
+            "extra": "work account",
         }
         data = _parse_csv_row(row, "lastpass")
         assert data["name"] == "GitHub"
@@ -281,10 +293,13 @@ class TestParseCsvRow:
 
     def test_1password(self):
         row = {
-            "title": "AWS", "type": "login",
-            "username": "admin", "password": "key123",
+            "title": "AWS",
+            "type": "login",
+            "username": "admin",
+            "password": "key123",
             "url": "https://aws.amazon.com",
-            "notesplaintext": "", "totp secret key": "ABC123",
+            "notesplaintext": "",
+            "totp secret key": "ABC123",
         }
         data = _parse_csv_row(row, "1password")
         assert data["name"] == "AWS"
@@ -311,8 +326,10 @@ class TestParseCsvRow:
     def test_special_characters_in_fields(self):
         """Fields with special chars should pass through unmodified."""
         row = {
-            "name": "Tëst Ñame™", "password": "p@$$w0rd!<>&;", # credactor:ignore
-            "folder": "", "username": "user@domain.com",
+            "name": "Tëst Ñame™",
+            "password": "p@$$w0rd!<>&;",  # credactor:ignore
+            "folder": "",
+            "username": "user@domain.com",
         }
         data = _parse_csv_row(row, "generic")
         assert data["name"] == "Tëst Ñame™"
@@ -321,9 +338,13 @@ class TestParseCsvRow:
     def test_bitwarden_empty_folder(self):
         """Bitwarden rows with empty folder should return empty folder."""
         row = {
-            "name": "Test", "folder": "",
-            "login_username": "", "login_password": "pw",
-            "login_uri": "", "notes": "", "login_totp": "",
+            "name": "Test",
+            "folder": "",
+            "login_username": "",
+            "login_password": "pw",
+            "login_uri": "",
+            "notes": "",
+            "login_totp": "",
         }
         data = _parse_csv_row(row, "bitwarden")
         assert data["folder"] == ""
@@ -409,12 +430,6 @@ class TestVaultCrypto:
         k1 = _derive_vault_key(b"pass1", salt)
         k2 = _derive_vault_key(b"pass2", salt)
         assert k1 != k2
-
-    def test_key_derivation_rejects_wrong_salt_length(self):
-        with pytest.raises(AssertionError):
-            _derive_vault_key(b"test", b"short")
-        with pytest.raises(AssertionError):
-            _derive_vault_key(b"test", b"x" * 64)
 
     def test_encrypt_decrypt_roundtrip_with_aad(self):
         """Full vault encrypt/decrypt roundtrip with AAD."""

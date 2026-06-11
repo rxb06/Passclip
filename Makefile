@@ -1,4 +1,4 @@
-.PHONY: help install dev test lint scan clean build
+.PHONY: help install dev test lint fmt scan clean build
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -13,8 +13,12 @@ dev: ## Install with all optional deps for development
 test: ## Run tests
 	python -m pytest tests/ -v
 
-lint: ## Run ruff linter
-	ruff check passclip.py
+lint: ## Run ruff linter + format check (same scope as CI)
+	ruff check .
+	ruff format --check .
+
+fmt: ## Auto-format with ruff
+	ruff format .
 
 scan: ## Scan for hardcoded credentials (dry-run)
 	credactor --dry-run .
