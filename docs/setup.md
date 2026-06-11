@@ -316,10 +316,9 @@ passclip config default_password_length 24
 |---|---|---|
 | `clip_timeout` | `45` | Seconds before clipboard is auto-cleared (minimum: 1) |
 | `default_password_length` | `20` | Default length for generated passwords (minimum: 8) |
-| `default_mode` | `shell` | What happens when you run `passclip` with no args (`shell` or `ls`) |
 | `pass_dir` | `~/.password-store` | Path to your password store |
 
-Invalid values are automatically reset to defaults on load. For example, setting `clip_timeout` to `0` or a negative number resets it to `45`. Setting `default_password_length` below `8` resets it to `20`. Setting `default_mode` to anything other than `shell` or `ls` resets it to `shell`.
+Invalid values are automatically reset to defaults on load. For example, setting `clip_timeout` to `0` or a negative number resets it to `45`. Setting `default_password_length` below `8` resets it to `20`.
 
 ### Changing the password store location
 

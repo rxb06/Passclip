@@ -67,25 +67,16 @@ class TestLoadConfig:
             cfg = load_config()
         assert cfg["default_password_length"] == DEFAULT_CONFIG["default_password_length"]
 
-    def test_resets_invalid_default_mode(self, tmp_path):
-        cfg_path = tmp_path / "config.json"
-        cfg_path.write_text(json.dumps({"default_mode": "invalid"}))
-        with patch("passclip.CONFIG_PATH", cfg_path):
-            cfg = load_config()
-        assert cfg["default_mode"] == DEFAULT_CONFIG["default_mode"]
-
     def test_accepts_valid_config(self, tmp_path):
         cfg_path = tmp_path / "config.json"
         cfg_path.write_text(json.dumps({
             "clip_timeout": 60,
             "default_password_length": 24,
-            "default_mode": "ls",
         }))
         with patch("passclip.CONFIG_PATH", cfg_path):
             cfg = load_config()
         assert cfg["clip_timeout"] == 60
         assert cfg["default_password_length"] == 24
-        assert cfg["default_mode"] == "ls"
 
     def test_corrupt_json_returns_defaults(self, tmp_path):
         cfg_path = tmp_path / "config.json"

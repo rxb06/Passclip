@@ -42,8 +42,8 @@ import json
 import os
 import readline
 import secrets
+import shlex
 import shutil
-import signal
 import string
 import subprocess
 import sys
@@ -68,13 +68,10 @@ from rich.table import Table
 console = Console()
 
 
-def _sigint_handler(sig: int, frame) -> None:
-    """Graceful Ctrl-C: print message and exit cleanly."""
-    console.print("\n[yellow]Interrupted.[/yellow]")
-    sys.exit(130)
-
-
-signal.signal(signal.SIGINT, _sigint_handler)
+# Ctrl-C handling lives in main(): a module-level SIGINT handler that calls
+# sys.exit() raises SystemExit instead of KeyboardInterrupt, which made every
+# `except KeyboardInterrupt` in this file unreachable and killed the whole
+# program at any prompt.
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -88,7 +85,6 @@ CONFIG_PATH = Path.home() / ".config" / "passclip" / "config.json"
 DEFAULT_CONFIG: Dict = {
     "clip_timeout": 45,
     "default_password_length": 20,
-    "default_mode": "shell",
     "pass_dir": str(Path.home() / ".password-store"),
 }
 
@@ -116,8 +112,6 @@ def load_config() -> Dict:
     pw_len = cfg.get("default_password_length")
     if not isinstance(pw_len, int) or pw_len < 8:
         cfg["default_password_length"] = DEFAULT_CONFIG["default_password_length"]
-    if cfg.get("default_mode") not in ("shell", "ls"):
-        cfg["default_mode"] = DEFAULT_CONFIG["default_mode"]
     return cfg
 
 
@@ -167,8 +161,13 @@ def run_command(
     command_parts: List[str],
     interactive: bool = False,
     input_data: Optional[str] = None,
+    strip: bool = True,
 ) -> Tuple[str, str, int]:
-    """Run a subprocess safely (no shell=True). Returns (stdout, stderr, returncode)."""
+    """Run a subprocess safely (no shell=True). Returns (stdout, stderr, returncode).
+
+    strip=False preserves stdout exactly — needed when the output is
+    whitespace-significant (e.g. a password with leading/trailing spaces).
+    """
     try:
         if interactive:
             result = subprocess.run(command_parts)
@@ -180,7 +179,8 @@ def run_command(
             input=input_data,
             check=False,
         )
-        return result.stdout.strip(), result.stderr.strip(), result.returncode
+        stdout = result.stdout.strip() if strip else result.stdout
+        return stdout, result.stderr.strip(), result.returncode
     except FileNotFoundError:
         name = command_parts[0] if command_parts else "unknown"
         return "", f"Command not found: '{name}'. Is it installed and in PATH?", 127
@@ -208,6 +208,19 @@ def _error(msg: str, hint: str = "") -> None:
     console.print(f"[red]Error:[/red] {msg}")
     if hint:
         console.print(f"[dim]{hint}[/dim]")
+
+
+def _split_args(arg: str) -> List[str]:
+    """Split shell-command arguments, honoring quotes.
+
+    Entry names may legally contain spaces, so the shell accepts quoting
+    ('get "web/my site"'). Unbalanced quotes (an apostrophe is also legal in
+    names) fall back to plain whitespace splitting instead of crashing.
+    """
+    try:
+        return shlex.split(arg)
+    except ValueError:
+        return arg.split()
 
 
 @contextlib.contextmanager
@@ -535,7 +548,10 @@ def format_entry(data: Dict[str, str]) -> str:
 
 def get_entry_raw(entry: str) -> Tuple[Optional[str], Optional[str]]:
     """Return (content, error). content is None on failure."""
-    out, err, rc = run_command(["pass", "show", entry])
+    # strip=False: a password may legitimately start or end with whitespace —
+    # only the newline `pass show` appends gets removed
+    out, err, rc = run_command(["pass", "show", entry], strip=False)
+    out = out.rstrip("\n")
     if rc != 0 or not out:
         msg = err or ""
         lower = msg.lower()
@@ -722,6 +738,15 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
         _error(err)
         return
 
+    # `pass insert -f` overwrites silently; ask first, like plain `pass` does
+    if entry in get_all_entries():
+        if not Confirm.ask(
+            f"[yellow]'{escape(entry)}' already exists. Overwrite?[/yellow]",
+            default=False,
+        ):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
     if structured:
         console.print(Panel(
             "Fill in the fields below. Press Enter to skip optional fields.\n"
@@ -752,16 +777,16 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
                 "[dim]OTP secret[/dim] (Enter to skip)", password=True, default=""
             )
             if otp_secret:
-                import pyotp
-                try:
-                    if otp_secret.startswith("otpauth://"):
-                        pyotp.parse_uri(otp_secret)
-                    else:
-                        pyotp.TOTP(otp_secret.upper().replace(" ", ""))
-                    console.print("[green]OTP secret validated.[/green]")
-                except (ValueError, TypeError, KeyError):
-                    console.print("[yellow]Invalid OTP secret, skipping.[/yellow]")
+                # Same strict validation as `otp add` — the old inline check
+                # accepted secrets that crashed at code-generation time
+                otp_err = _validate_otp_secret(otp_secret)
+                if otp_err:
+                    console.print(
+                        f"[yellow]Invalid OTP secret, skipping: {otp_err}[/yellow]"
+                    )
                     otp_secret = ""
+                else:
+                    console.print("[green]OTP secret validated.[/green]")
         # Enforce field length limits to prevent OOM from pasted data
         for fname, fval in [("password", password), ("username", username),
                             ("email", email), ("url", url), ("notes", notes),
@@ -1095,13 +1120,15 @@ def cmd_otp_add(entry: Optional[str] = None) -> None:
             return
         secret = raw
 
-    # Remove old OTP fields, add new one
-    for old_key in ("otp", "totp", "secret", "otpauth"):
-        data.pop(old_key, None)
-    data["otp"] = secret
-
-    # Write back
-    new_content = format_entry(data)
+    # Targeted line edit — never re-serialize the whole entry. pass files are
+    # free-form by design; a parse/format roundtrip would lowercase keys,
+    # reorder lines, and relocate notes, breaking other tools' expectations.
+    lines = content.splitlines()
+    kept = lines[:1] + [
+        ln for ln in lines[1:]
+        if not ln.lower().startswith(("otp:", "totp:", "secret:", "otpauth:"))
+    ]
+    new_content = "\n".join(kept + [f"otp: {secret}"]) + "\n"
     ok, err = _insert_entry(entry, new_content)
     if not ok:
         _error(f"Failed to save: {err}")
@@ -1125,41 +1152,50 @@ def cmd_otp_add(entry: Optional[str] = None) -> None:
         console.print(f"[yellow]Warning: could not generate first code: {e}[/yellow]")
 
 
-def cmd_run(entry: str, command: List[str]) -> None:
+def cmd_run(entry: str, command: List[str]) -> int:
     """
-    Inject a pass entry's fields as environment variables, then exec `command`.
+    Inject a pass entry's fields as environment variables, then run `command`.
 
     Field mapping:  password -> PASS_PASSWORD
                     username -> PASS_USERNAME
                     url      -> PASS_URL  (etc.)
+
+    Returns the child's exit code (127 if the command was not found) so the
+    CLI can propagate it via sys.exit while the interactive shell keeps
+    running.
     """
     if not command:
         console.print("[red]No command supplied after entry.[/red]")
         console.print("[dim]Usage: run <entry> -- <command>[/dim]")
-        return
+        return 2
 
     content, error = get_entry_raw(entry)
     if error:
-        console.print(f"[red]Error:[/red] {error}")
-        return
+        _error(error)
+        return 1
 
     data = parse_entry(content)
     env = os.environ.copy()
     injected = []
     for key, value in data.items():
-        env_key = f"PASS_{key.upper().replace('-', '_')}"
+        # Env var names must be [A-Z0-9_] — a 'recovery code' field would
+        # otherwise produce a variable no shell can reference
+        env_key = "PASS_" + "".join(
+            c if (c.isascii() and c.isalnum()) else "_" for c in key.upper()
+        )
         env[env_key] = value
         injected.append(env_key)
 
     console.print(f"[dim]Injecting:[/dim] {', '.join(injected)}")
-    console.print(f"[dim]Running:[/dim] {' '.join(command)}\n")
+    console.print(f"[dim]Running:[/dim] {escape(' '.join(command))}\n")
     try:
         result = subprocess.run(command, env=env)
-        sys.exit(result.returncode)
+        return result.returncode
     except FileNotFoundError:
-        console.print(f"[red]Command not found:[/red] {command[0]}")
+        console.print(f"[red]Command not found:[/red] {escape(command[0])}")
+        return 127
     except KeyboardInterrupt:
-        pass
+        return 130
 
 
 def cmd_sync() -> None:
@@ -1499,7 +1535,13 @@ def smart_copy(args: List[str]) -> None:
             mode = "otp"
         elif a in ("-s", "--show"):
             mode = "show"
-        elif not a.startswith("-"):
+        elif a.startswith("-"):
+            # A typo'd flag must not fall through to the default action
+            # (copying the password to the clipboard)
+            _error(f"Unknown flag: {escape(a)}",
+                   "Usage: passclip <search-term> [-u|-o|-s]")
+            return
+        else:
             term = a
 
     if not term:
@@ -1883,7 +1925,6 @@ def cmd_config_show() -> None:
     descriptions = {
         "clip_timeout": "Seconds before clipboard is cleared",
         "default_password_length": "Default length for generated passwords",
-        "default_mode": "Startup mode (shell/menu)",
         "pass_dir": "Path to your password store",
     }
     for key, val in CONFIG.items():
@@ -2068,7 +2109,7 @@ class PassShell(cmd.Cmd):
 
     def do_get(self, arg: str) -> None:
         """get [entry] [--clip] [--field FIELD]  Show a password entry."""
-        parts = arg.split()
+        parts = _split_args(arg)
         entry, clip, field = None, False, None
         i = 0
         while i < len(parts):
@@ -2077,6 +2118,11 @@ class PassShell(cmd.Cmd):
             elif parts[i] == "--field" and i + 1 < len(parts):
                 field = parts[i + 1]
                 i += 1
+            elif parts[i].startswith("-"):
+                console.print(
+                    f"[yellow]Unknown or incomplete flag: {escape(parts[i])}[/yellow]"
+                )
+                return
             else:
                 entry = parts[i]
             i += 1
@@ -2106,7 +2152,7 @@ class PassShell(cmd.Cmd):
 
     def do_generate(self, arg: str) -> None:
         """generate [entry] [length] [--no-symbols] [--clip]  Generate a password."""
-        parts = arg.split()
+        parts = _split_args(arg)
         entry, length, no_symbols, clip = None, None, False, False
         for p in parts:
             if p == "--no-symbols":
@@ -2153,6 +2199,9 @@ class PassShell(cmd.Cmd):
 
     def do_ls(self, arg: str) -> None:
         """ls [path]  List all entries."""
+        if arg.strip().startswith("-"):
+            _error("Path cannot start with '-'.")
+            return
         cmd_args = ["pass", "ls"] + ([arg.strip()] if arg.strip() else [])
         out, err, rc = run_command(cmd_args)
         console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
@@ -2160,6 +2209,9 @@ class PassShell(cmd.Cmd):
     def do_find(self, arg: str) -> None:
         """find <term>  Search entries by name, then optionally act on a result."""
         term = arg.strip() or Prompt.ask("Search term")
+        if term.startswith("-"):
+            _error("Search term cannot start with '-'.")
+            return
         out, err, rc = run_command(["pass", "find", term])
         console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
         if rc == 0:
@@ -2174,7 +2226,9 @@ class PassShell(cmd.Cmd):
     def do_otp(self, arg: str) -> None:
         """otp [add] [entry]  Generate TOTP code, or 'otp add' to set up OTP."""
         parts = arg.strip().split(None, 1)
-        if parts and parts[0] == "add":
+        # Accept both spellings — the CLI uses --add, and help text has
+        # advertised it; the shell must not turn it into an entry search
+        if parts and parts[0] in ("add", "--add"):
             cmd_otp_add(parts[1].strip() if len(parts) > 1 else None)
         else:
             cmd_otp(arg.strip() or None)
@@ -2185,7 +2239,9 @@ class PassShell(cmd.Cmd):
         """run <entry> -- <command>  Inject entry fields as env vars and run a command."""
         if " -- " in arg:
             entry_part, cmd_part = arg.split(" -- ", 1)
-            cmd_run(entry_part.strip(), cmd_part.split())
+            # shlex preserves quoted arguments ('run e -- echo "a b"'),
+            # matching how the CLI's argv path behaves
+            cmd_run(entry_part.strip(), _split_args(cmd_part))
         else:
             console.print("[red]Usage:[/red] run <entry> -- <command>")
             console.print("[dim]Example: run aws/prod -- aws s3 ls[/dim]")
@@ -2196,7 +2252,7 @@ class PassShell(cmd.Cmd):
 
     def do_import(self, arg: str) -> None:
         """import <file> [format] [--dry-run]  Import from Bitwarden/LastPass/1Password CSV."""
-        parts = arg.split()
+        parts = _split_args(arg)
         if not parts:
             console.print(
                 "[red]Usage:[/red] import <file>"
@@ -2220,12 +2276,15 @@ class PassShell(cmd.Cmd):
 
     def do_mv(self, arg: str) -> None:
         """mv <old> <new>  Move or rename an entry."""
-        parts = arg.split()
+        parts = _split_args(arg)
         if len(parts) >= 2:
             old, new = parts[0], parts[1]
         else:
             old = Prompt.ask("Source entry")
             new = Prompt.ask("Destination")
+        if old.startswith("-"):
+            _error("Source entry cannot start with '-'.")
+            return
         ok, err_msg = validate_entry_name(new)
         if not ok:
             _error(err_msg)
@@ -2238,12 +2297,15 @@ class PassShell(cmd.Cmd):
 
     def do_cp(self, arg: str) -> None:
         """cp <old> <new>  Copy an entry."""
-        parts = arg.split()
+        parts = _split_args(arg)
         if len(parts) >= 2:
             old, new = parts[0], parts[1]
         else:
             old = Prompt.ask("Source entry")
             new = Prompt.ask("Destination")
+        if old.startswith("-"):
+            _error("Source entry cannot start with '-'.")
+            return
         ok, err_msg = validate_entry_name(new)
         if not ok:
             _error(err_msg)
@@ -2258,6 +2320,9 @@ class PassShell(cmd.Cmd):
         """archive [entry]  Move an entry to the archive/ folder."""
         entry = arg.strip() or fuzzy_select(get_all_entries(), "Select entry to archive")
         if not entry:
+            return
+        if entry.startswith("archive/"):
+            console.print(f"[yellow]'{escape(entry)}' is already archived.[/yellow]")
             return
         _, err, rc = run_command(["pass", "mv", entry, f"archive/{entry}"])
         console.print(
@@ -2277,6 +2342,8 @@ class PassShell(cmd.Cmd):
         entry = arg.strip() or fuzzy_select(display, "Select entry to restore")
         if not entry:
             return
+        # Accept the name as `ls` displays it ('archive/web/foo') too
+        entry = entry.removeprefix("archive/")
         dest = Prompt.ask("Restore to", default=entry)
         ok, err_msg = validate_entry_name(dest)
         if not ok:
@@ -2377,10 +2444,12 @@ class PassShell(cmd.Cmd):
             ],
             "Power User": [
                 ("otp [entry]",                      "Generate TOTP code from stored secret"),
-                ("otp --add [entry]",                "Add/update OTP secret on an entry"),
+                ("otp add [entry]",                  "Add/update OTP secret on an entry"),
                 ("run <entry> -- <cmd>",             "Inject entry fields as env vars and run"),
                 ("health",                           "Password strength + duplicate report"),
                 ("import <file> [format]",           "Import from Bitwarden/LastPass/1Password"),
+                ("export_vault <file>",              "Export store to an encrypted vault file"),
+                ("import_vault <file>",              "Restore store from a vault file"),
                 ("sync",                             "Git pull + push the password store"),
                 ("gitlog [n]",                       "Show recent password store git history"),
             ],
@@ -2408,18 +2477,18 @@ class PassShell(cmd.Cmd):
             console.print(t)
 
     def do_export_vault(self, arg: str) -> None:
-        """export-vault <file>  Export password store to an AES-encrypted vault file."""
-        parts = arg.split()
+        """export_vault <file>  Export password store to an AES-encrypted vault file."""
+        parts = _split_args(arg)
         if not parts:
-            console.print("[yellow]Usage: export-vault <output_file>[/yellow]")
+            console.print("[yellow]Usage: export_vault <output_file>[/yellow]")
             return
         cmd_export_vault(parts[0])
 
     def do_import_vault(self, arg: str) -> None:
-        """import-vault <file> [--force]  Restore password store from a vault file."""
-        parts = arg.split()
+        """import_vault <file> [--force]  Restore password store from a vault file."""
+        parts = _split_args(arg)
         if not parts:
-            console.print("[yellow]Usage: import-vault <vault_file> [--force][/yellow]")
+            console.print("[yellow]Usage: import_vault <vault_file> [--force][/yellow]")
             return
         force = "--force" in parts or "-f" in parts
         cmd_import_vault(parts[0], force=force)
@@ -2445,9 +2514,17 @@ class PassShell(cmd.Cmd):
     def default(self, line: str) -> None:
         """Handle unrecognized commands with an error message."""
         console.print(
-            f"[red]Unknown command:[/red] {line}  "
+            f"[red]Unknown command:[/red] {escape(line)}  "
             "— Type [bold]help[/bold] to see available commands."
         )
+
+    def onecmd(self, line: str) -> bool:
+        """Run one command; Ctrl-C cancels it and returns to the prompt."""
+        try:
+            return super().onecmd(line)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled.[/yellow]")
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -2607,14 +2684,27 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _start_shell() -> None:
+    shell = PassShell()
     try:
-        PassShell().cmdloop()
+        shell.cmdloop()
     except KeyboardInterrupt:
+        # Ctrl-C at the prompt itself exits like Ctrl-D does
         console.print("\n[dim]Goodbye.[/dim]")
+    finally:
+        shell._release_lock()  # idempotent; covers every exit path
 
 
 def main() -> None:
-    """Entry point: dispatch to smart copy, a subcommand, or the interactive shell."""
+    """Entry point: graceful Ctrl-C around the real dispatch."""
+    try:
+        _main()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/yellow]")
+        sys.exit(130)
+
+
+def _main() -> None:
+    """Dispatch to smart copy, a subcommand, or the interactive shell."""
     if len(sys.argv) == 1:
         _start_shell()
         return
@@ -2629,8 +2719,9 @@ def main() -> None:
         "import", "find", "ls", "mv", "cp", "archive", "restore",
         "wizard", "config", "shell", "export-vault", "import-vault",
     }
+    _smart_flags = {"-u", "--user", "-o", "--otp", "-s", "--show"}
     first = sys.argv[1]
-    if first not in _known and not first.startswith("-"):
+    if (first not in _known and not first.startswith("-")) or first in _smart_flags:
         smart_copy(sys.argv[1:])
         return
 
@@ -2688,7 +2779,7 @@ def main() -> None:
         remainder = args.cmd
         if remainder and remainder[0] == "--":
             remainder = remainder[1:]
-        cmd_run(args.entry, remainder)
+        sys.exit(cmd_run(args.entry, remainder))
 
     elif args.command == "sync":
         cmd_sync()
@@ -2700,6 +2791,9 @@ def main() -> None:
         cmd_import(args.file, args.format, dry_run=getattr(args, "dry_run", False))
 
     elif args.command == "find":
+        if args.term.startswith("-"):
+            _error("Search term cannot start with '-'.")
+            return
         out, err, rc = run_command(["pass", "find", args.term])
         console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
         if rc == 0:
@@ -2710,11 +2804,17 @@ def main() -> None:
                     _entry_action_menu(entry)
 
     elif args.command == "ls":
+        if args.path.startswith("-"):
+            _error("Path cannot start with '-'.")
+            return
         cmd_args = ["pass", "ls"] + ([args.path] if args.path else [])
         out, err, rc = run_command(cmd_args)
         console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
 
     elif args.command == "mv":
+        if args.old.startswith("-"):
+            _error("Source entry cannot start with '-'.")
+            return
         ok, err_msg = validate_entry_name(args.new)
         if not ok:
             _error(err_msg)
@@ -2726,6 +2826,9 @@ def main() -> None:
         )
 
     elif args.command == "cp":
+        if args.old.startswith("-"):
+            _error("Source entry cannot start with '-'.")
+            return
         ok, err_msg = validate_entry_name(args.new)
         if not ok:
             _error(err_msg)
@@ -2739,6 +2842,9 @@ def main() -> None:
     elif args.command == "archive":
         entry = args.entry or fuzzy_select(get_all_entries(), "Select entry to archive")
         if entry:
+            if entry.startswith("archive/"):
+                console.print(f"[yellow]'{escape(entry)}' is already archived.[/yellow]")
+                return
             _, err, rc = run_command(["pass", "mv", entry, f"archive/{entry}"])
             console.print(
                 f"[green]Archived '{entry}'.[/green]" if rc == 0
@@ -2750,6 +2856,8 @@ def main() -> None:
         display = [e[len("archive/"):] for e in archived]
         entry = args.entry or fuzzy_select(display, "Select entry to restore")
         if entry:
+            # Accept the name as `ls` displays it ('archive/web/foo') too
+            entry = entry.removeprefix("archive/")
             dest = Prompt.ask("Restore to", default=entry)
             ok, err_msg = validate_entry_name(dest)
             if not ok:
