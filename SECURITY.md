@@ -46,11 +46,11 @@ Passclip is a CLI built on top of [`pass`](https://www.passwordstore.org/), the 
 
 - **Input validation**: entry names are checked for path traversal (`..`), shell metacharacters, excessive depth, and other tricks before any write operation.
 - **Subprocess safety**: all calls to `pass`, `gpg`, `git`, and other tools use Python's `subprocess` module with list arguments. There is no `shell=True` anywhere in the codebase, which means no shell injection.
-- **Clipboard management**: passwords are auto-cleared from the clipboard after a configurable timeout (default 45s). Passclip checks clipboard content before clearing (using constant-time comparison) to avoid wiping something you copied after the password. The clipboard clear helper uses no shell commands — all paths use Python subprocess with list arguments.
+- **Clipboard management**: passwords are auto-cleared from the clipboard after a configurable timeout (default 45s). When pyperclip is installed, Passclip checks clipboard content before clearing (constant-time comparison on UTF-8 bytes, so non-ASCII secrets are handled) to avoid wiping something you copied after the password; the native-tool fallback currently clears unconditionally. The clipboard clear helper uses no shell commands — all paths use Python subprocess with list arguments.
 - **Vault encryption**: the `export-vault` / `import-vault` feature uses AES-256-GCM with a key derived via PBKDF2-SHA256 at 600,000 iterations. The magic header, salt, and nonce are authenticated as additional associated data (AAD), so tampering with any part of the vault file is detected. Vault files are written atomically (temp file + rename) to prevent partial files.
 - **Vault export and entry listing**: symlinks and any path whose resolved location escapes the password store root are skipped during vault export and entry enumeration. An attacker who plants a directory symlink inside the store (e.g. via a compromised git remote) cannot cause arbitrary files to be included in a vault backup or surfaced as store entries.
 - **Vault import hardening**: tar extraction rejects symlinks, hardlinks, absolute paths, null bytes, and any member whose resolved path escapes the extraction root (checked via `Path.is_relative_to()`, not string prefix matching). Extraction uses `filter='data'` on Python 3.12+ to strip setuid bits and device nodes from extracted members.
-- **File permissions**: config files, history files, vault exports, and pre-delete backups are all created with `0600` permissions (owner read/write only).
+- **File permissions**: config files, history files, vault exports, and pre-delete backups are all created with `0600` permissions (owner read/write only). The `~/.config/passclip/` and `backups/` directories are kept at `0700`, so other local users cannot list backup filenames (which embed entry paths).
 - **Vault unlock rate limiting**: vault import allows a maximum of 3 passphrase attempts with exponential backoff (1s, 3s) to slow brute-force attacks against vault files.
 - **Input length limits**: entry fields (username, email, URL, notes) are capped at 64KB to prevent memory exhaustion from oversized input.
 - **OTP validation**: TOTP secrets are validated before storage — base32 decode is verified, minimum length enforced, and `otpauth://` URIs must contain a `secret=` parameter.
@@ -83,7 +83,7 @@ Between copying a password to the clipboard and the auto-clear timer firing, any
 
 ### Shell history
 
-The interactive shell stores command history at `~/.config/passclip/history`. This file contains command names and entry paths (like `get email/gmail`) but **not** passwords. It's created with `0600` permissions. If this concerns you, you can disable history by removing the file and making it unwritable:
+The interactive shell stores command history at `~/.config/passclip/history`. This file contains command names and entry paths (like `get email/gmail`) but **not** secrets: password and OTP-secret prompts are hidden (they bypass readline entirely), and the username/email/URL/notes prompts are excluded from readline history. It's created with `0600` permissions in a `0700` directory. If this concerns you, you can disable history persistence by locking the file — the shell detects this and skips history without breaking:
 
 ```bash
 rm ~/.config/passclip/history
