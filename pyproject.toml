@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+# >=77 is required for the PEP 639 string `license` field below; older
+# setuptools rejects this pyproject. wheel is bundled by modern setuptools.
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -39,7 +41,7 @@ classifiers = [
 ]
 dependencies = [
     "rich>=13.0",
-    "cryptography>=41.0",
+    "cryptography>=46.0.7",  # floor = current patched line; no upper bound by policy
 ]
 
 [project.optional-dependencies]

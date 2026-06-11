@@ -2,7 +2,7 @@
 
 # Required
 rich>=13.0
-cryptography>=41.0   # AES-256-GCM vault export/import
+cryptography>=46.0.7   # AES-256-GCM vault export/import; floor = current patched line
 
 # Recommended — clipboard support (auto-clear after timeout)
 pyperclip
