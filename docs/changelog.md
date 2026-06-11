@@ -10,6 +10,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 The remediation release: every finding from the June 2026 security review and code-quality review, fixed across nine phases. **Support for all versions before 1.4 ends with this release** — upgrade unconditionally.
 
+### Dependencies and Python support
+
+- **Minimum Python is now 3.11** (was 3.10). Python 3.10 reaches end of life in October 2026; dropping it removes the `tomli`/`exceptiongroup` backport shims (both are standard library on 3.11+) and lets the project use the current Credactor (2.4, which requires 3.11+). The test matrix is now 3.11/3.12/3.13.
+- **All dependencies updated to current latest**: `rich` 15.0.0, `cryptography` 48.0.1, `pyperclip` 1.11.0, `pyotp` 2.9.0; CI/build pins `build` 1.5.0, `ruff` 0.15.17, `pytest` 9.0.3, `pip-audit` 2.10.1, `setuptools` 82.0.1, `credactor` 2.4.0. The hashed CI lockfile was regenerated with `pip-compile`; `pip-audit` reports no known vulnerabilities.
+- The pre-commit Credactor and Ruff hooks are pinned to the matching commit SHAs, and Dependabot now opens its bumps against `develop` (the integration branch) instead of `main`.
+
 ### Fixed — correctness
 
 - **Vault restore with a custom `pass_dir`** extracted into a parallel `~/.password-store`, left the real store untouched, and reported success with "0 passwords restored". The archive's top folder is now remapped to the configured store name before extraction.

@@ -67,7 +67,7 @@ The test suite covers config loading and validation, entry parsing and formattin
    ```
 
 2. Make your changes. Keep the style consistent with the existing code:
-   - Python 3.10+ compatible
+   - Python 3.11+ compatible
    - Use `rich` for terminal output (no raw `print` for user-facing messages)
    - Subprocess calls use list arguments (never `shell=True`)
    - Entry names go through `validate_entry_name()` before any write
