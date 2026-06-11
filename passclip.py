@@ -32,6 +32,7 @@ __version__ = "1.2.1"
 
 import argparse
 import cmd
+import contextlib
 import csv
 import fcntl
 import hashlib
@@ -122,6 +123,7 @@ def load_config() -> Dict:
 def save_config(config: Dict) -> None:
     """Persist config to disk with 0o600 permissions."""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(CONFIG_PATH.parent, 0o700)  # not umask-masked; repairs pre-existing dirs
     fd = os.open(str(CONFIG_PATH), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(config, f, indent=2)
@@ -205,6 +207,20 @@ def _error(msg: str, hint: str = "") -> None:
     console.print(f"[red]Error:[/red] {msg}")
     if hint:
         console.print(f"[dim]{hint}[/dim]")
+
+
+@contextlib.contextmanager
+def _no_history():
+    """Keep typed values (usernames, notes) out of readline history.
+
+    Prompt.ask without password=True goes through input(), which appends to
+    readline history; in shell mode that history is persisted to disk.
+    """
+    readline.set_auto_history(False)
+    try:
+        yield
+    finally:
+        readline.set_auto_history(True)
 
 
 def validate_entry_name(name: str) -> Tuple[bool, str]:
@@ -322,101 +338,123 @@ def fuzzy_select(entries: List[str], prompt_text: str = "Select entry") -> Optio
 # ---------------------------------------------------------------------------
 
 
-def _spawn_clipboard_clear(text: str, timeout: int) -> None:
+# Native clipboard tools and their paired paste commands. The pairs let the
+# clearer verify clipboard content before wiping it, mirroring the pyperclip
+# path.
+_CLIPBOARD_TOOLS = {
+    "pbcopy":  {"copy": ["pbcopy"], "paste": ["pbpaste"]},
+    "xclip":   {"copy": ["xclip", "-selection", "clipboard"],
+                "paste": ["xclip", "-selection", "clipboard", "-o"]},
+    "wl-copy": {"copy": ["wl-copy"], "paste": ["wl-paste"]},
+}
+
+# Clear scripts run in a detached child. The secret arrives over stdin (never
+# argv or env — pipes do not show up in `ps` or /proc/<pid>/environ). The
+# comparison is done on UTF-8 bytes: hmac.compare_digest raises TypeError on
+# non-ASCII str operands, which would silently skip the clear.
+_PYPERCLIP_CLEAR_SCRIPT = (
+    "import hmac, os, sys, time\n"
+    "try:\n"
+    "    data = sys.stdin.buffer.read()\n"
+    "    import pyperclip\n"
+    "    s = int(os.environ.get('_PASSCLIP_CLIP_TIMEOUT', '45'))\n"
+    "    time.sleep(s)\n"
+    "    cur = (pyperclip.paste() or '').encode('utf-8', 'surrogatepass')\n"
+    "    if hmac.compare_digest(cur, data):\n"
+    "        pyperclip.copy('')\n"
+    "except Exception:\n"
+    "    pass\n"
+)
+
+# Native variant: verify via the paired paste tool. If the clipboard cannot
+# be read at all, clear anyway — failing safe for the secret.
+_NATIVE_CLEAR_SCRIPT = (
+    "import hmac, os, subprocess, sys, time\n"
+    "data = sys.stdin.buffer.read()\n"
+    "s = int(os.environ.get('_PASSCLIP_CLIP_TIMEOUT', '45'))\n"
+    "time.sleep(s)\n"
+    "def clear():\n"
+    "    subprocess.run({copy_cmd!r}, input=b'', capture_output=True)\n"
+    "try:\n"
+    "    r = subprocess.run({paste_cmd!r}, capture_output=True, timeout=5)\n"
+    "    match = (hmac.compare_digest(r.stdout, data)\n"
+    "             or hmac.compare_digest(r.stdout.rstrip(b'\\n'), data))\n"
+    "    if r.returncode != 0 or match:\n"
+    "        clear()\n"
+    "except Exception:\n"
+    "    clear()\n"
+)
+
+
+def _spawn_clipboard_clear(text: str, timeout: int, mechanism: str) -> None:
     """Spawn a detached process that clears the clipboard after `timeout` seconds.
 
     A daemon thread would be killed the instant the CLI process exits after
     copying.  This subprocess uses start_new_session=True so it survives the
-    parent process.  The sensitive text is passed via an environment variable,
-    never as a command-line argument, so it does not appear in `ps` output.
+    parent process.  The sensitive text is handed to the child over a stdin
+    pipe — unlike argv or environment variables, pipes are not visible in
+    `ps` output or /proc/<pid>/environ.
+
+    `mechanism` is how the copy actually happened ("pyperclip" or a native
+    tool name), so the clearer verifies through the same channel instead of
+    guessing from what is importable.
     """
-    env = os.environ.copy()
-    env["_PASSCLIP_CLIP_TEXT"] = text
-    env["_PASSCLIP_CLIP_TIMEOUT"] = str(timeout)
-
-    if DEPS.get("pyperclip"):
-        # Compare before clearing so we don't clobber unrelated clipboard content
-        # the user may have copied after us.
-        script = (
-            "import hmac, os, time\n"
-            "try:\n"
-            "    import pyperclip\n"
-            "    t = os.environ.get('_PASSCLIP_CLIP_TEXT', '')\n"
-            "    s = int(os.environ.get('_PASSCLIP_CLIP_TIMEOUT', '45'))\n"
-            "    time.sleep(s)\n"
-            "    if hmac.compare_digest(pyperclip.paste(), t):\n"
-            "        pyperclip.copy('')\n"
-            "except Exception:\n"
-            "    pass\n"
+    if mechanism == "pyperclip":
+        script = _PYPERCLIP_CLEAR_SCRIPT
+    else:
+        tools = _CLIPBOARD_TOOLS.get(mechanism)
+        if not tools:
+            return
+        script = _NATIVE_CLEAR_SCRIPT.format(
+            copy_cmd=tools["copy"], paste_cmd=tools["paste"]
         )
-        try:
-            subprocess.Popen(
-                [sys.executable, "-c", script],
-                env=env,
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-            )
-            return
-        except (FileNotFoundError, OSError):
-            pass
 
-    # Native-tool fallback: unconditional clear after timeout.
-    # (No paste-check possible without pyperclip.)
-    # Uses sleep + pipe without bash -c to avoid shell format strings.
-    safe_timeout = str(int(timeout))
-    clear_cmds = [
-        ("pbcopy",  ["pbcopy"]),
-        ("xclip",   ["xclip", "-selection", "clipboard"]),
-        ("wl-copy", ["wl-copy"]),
-    ]
-    for tool, pipe_cmd in clear_cmds:
-        if shutil.which(tool):
-            try:
-                # sleep in a detached Python one-liner; avoids bash -c entirely
-                script = (
-                    f"import subprocess, time; time.sleep({safe_timeout}); "
-                    f"subprocess.run({pipe_cmd!r}, input='', text=True, "
-                    "capture_output=True)"
-                )
-                subprocess.Popen(
-                    [sys.executable, "-c", script],
-                    start_new_session=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    close_fds=True,
-                )
-            except (FileNotFoundError, OSError):
-                pass
-            return
+    env = os.environ.copy()
+    env["_PASSCLIP_CLIP_TIMEOUT"] = str(int(timeout))
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+    except (FileNotFoundError, OSError):
+        return
+    try:
+        proc.stdin.write(text.encode("utf-8", "surrogatepass"))
+        proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass
 
 
 def copy_to_clipboard(text: str, timeout: Optional[int] = None) -> bool:
     """Copy text to clipboard and schedule auto-clear after `timeout` seconds."""
     timeout = timeout if timeout is not None else CONFIG.get("clip_timeout", 45)
-    copied = False
+    mechanism: Optional[str] = None
 
     if DEPS.get("pyperclip"):
         import pyperclip
         try:
             pyperclip.copy(text)
-            copied = True
+            mechanism = "pyperclip"
         except (OSError, RuntimeError):
             pass
 
-    if not copied:
-        for cmd_args in [["pbcopy"], ["xclip", "-selection", "clipboard"], ["wl-copy"]]:
-            if shutil.which(cmd_args[0]):
+    if mechanism is None:
+        for tool, cmds in _CLIPBOARD_TOOLS.items():
+            if shutil.which(tool):
                 try:
-                    subprocess.run(cmd_args, input=text, text=True, check=True,
+                    subprocess.run(cmds["copy"], input=text, text=True, check=True,
                                    capture_output=True)
-                    copied = True
+                    mechanism = tool
                     break
                 except (FileNotFoundError, subprocess.SubprocessError):
                     continue
 
-    if not copied:
+    if mechanism is None:
         console.print(
             "[red]No clipboard tool found.[/red] "
             "Install pyperclip: [cyan]pip install pyperclip[/cyan]"
@@ -428,7 +466,7 @@ def copy_to_clipboard(text: str, timeout: Optional[int] = None) -> bool:
         f"Auto-clearing in [bold]{timeout}s[/bold]..."
     )
 
-    _spawn_clipboard_clear(text, timeout)
+    _spawn_clipboard_clear(text, timeout, mechanism)
     return True
 
 
@@ -698,13 +736,16 @@ def cmd_insert(entry: Optional[str] = None, structured: bool = True) -> None:
             console.print(f"[green]Generated:[/green] {password}")
         score, label, color = password_strength(password)
         console.print(f"  Strength: {strength_bar(score, color)} [dim]{label}[/dim]")
-        username = Prompt.ask("[dim]Username[/dim]", default="")
-        email = Prompt.ask("[dim]Email[/dim]", default="")
-        url = Prompt.ask("[dim]URL[/dim]", default="")
-        notes = Prompt.ask("[dim]Notes[/dim]", default="")
+        with _no_history():
+            username = Prompt.ask("[dim]Username[/dim]", default="")
+            email = Prompt.ask("[dim]Email[/dim]", default="")
+            url = Prompt.ask("[dim]URL[/dim]", default="")
+            notes = Prompt.ask("[dim]Notes[/dim]", default="")
         otp_secret = ""
         if DEPS.get("pyotp"):
-            otp_secret = Prompt.ask("[dim]OTP secret[/dim] (Enter to skip)", default="")
+            otp_secret = Prompt.ask(
+                "[dim]OTP secret[/dim] (Enter to skip)", password=True, default=""
+            )
             if otp_secret:
                 import pyotp
                 try:
@@ -787,10 +828,11 @@ def cmd_generate(
     if content:
         pw = parse_entry(content)["password"]
         score, label, color = password_strength(pw)
-        console.print(f"  Password: {pw}")
-        console.print(f"  Strength: {strength_bar(score, color)} [dim]{label}[/dim]")
         if clip:
             copy_to_clipboard(pw)
+        else:
+            console.print(f"  Password: {pw}")
+        console.print(f"  Strength: {strength_bar(score, color)} [dim]{label}[/dim]")
 
 
 def cmd_health() -> None:
@@ -1019,7 +1061,9 @@ def cmd_otp_add(entry: Optional[str] = None) -> None:
             all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567= " for c in clip.upper())
         )
         if is_otpauth or looks_like_base32:
-            preview = clip[:50] + "..." if len(clip) > 50 else clip
+            # Redact: a base32 TOTP seed is bearer 2FA material — never echo
+            # it in full into terminal scrollback.
+            preview = f"{clip[:4]}… ({len(clip)} chars)"
             console.print(f"[dim]Found in clipboard:[/dim] {preview}")
             if Confirm.ask("Use this as the OTP secret?", default=True):
                 err = _validate_otp_secret(clip)
@@ -1035,7 +1079,7 @@ def cmd_otp_add(entry: Optional[str] = None) -> None:
         console.print(
             "[dim]Paste your OTP secret (base32 key) or otpauth:// URI.[/dim]"
         )
-        raw = Prompt.ask("[cyan]OTP secret[/cyan]")
+        raw = Prompt.ask("[cyan]OTP secret[/cyan]", password=True)
         if not raw or not raw.strip():
             console.print("[yellow]Cancelled.[/yellow]")
             return
@@ -1284,6 +1328,7 @@ def _backup_entry(entry: str) -> Optional[Path]:
     """Save entry content to ~/.config/passclip/backups/ before deletion."""
     backup_dir = Path.home() / ".config" / "passclip" / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(backup_dir, 0o700)  # backup filenames embed entry paths — keep unlistable
     content, _ = get_entry_raw(entry)
     if content:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1496,7 +1541,8 @@ def cmd_export_vault(output_path: str) -> None:
         console.print("[red]Passphrase cannot be empty.[/red]")
         return
     confirm = Prompt.ask("Confirm passphrase", password=True)
-    if not hmac.compare_digest(passphrase, confirm):
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str operands
+    if not hmac.compare_digest(passphrase.encode("utf-8"), confirm.encode("utf-8")):
         console.print("[red]Passphrases do not match.[/red]")
         return
 
@@ -1853,16 +1899,32 @@ class PassShell(cmd.Cmd):
 
     def _setup_history(self) -> None:
         hist = Path.home() / ".config" / "passclip" / "history"
-        hist.parent.mkdir(parents=True, exist_ok=True)
-        # 0o600 — owner read/write only; history contains entry names
-        hist.touch(mode=0o600, exist_ok=True)
         try:
+            hist.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(hist.parent, 0o700)
+            # 0o600 — owner read/write only; history contains entry names
+            hist.touch(mode=0o600, exist_ok=True)
+            # Repair group/other bits on a pre-existing file, but respect a
+            # user-locked file (e.g. chmod 000 to disable history persistence).
+            mode = hist.stat().st_mode & 0o777
+            if mode & 0o077:
+                os.chmod(hist, mode & ~0o077)
             readline.read_history_file(str(hist))
         except FileNotFoundError:
-            pass
+            pass  # no history yet — persistence still enabled below
+        except OSError:
+            return  # unreadable/locked history — skip persistence entirely
         import atexit
-        atexit.register(readline.write_history_file, str(hist))
+        atexit.register(self._write_history, str(hist))
         readline.set_history_length(500)
+
+    @staticmethod
+    def _write_history(path: str) -> None:
+        """Persist readline history, tolerating a locked/removed file."""
+        try:
+            readline.write_history_file(path)
+        except OSError:
+            pass
 
     def _acquire_lock(self) -> None:
         """Acquire an exclusive lock file using fcntl.flock (atomic, no race condition)."""
@@ -1886,14 +1948,18 @@ class PassShell(cmd.Cmd):
             pass
 
     def _release_lock(self) -> None:
-        """Release the flock and remove lock file on exit."""
+        """Release the flock and remove the lock file — only if this session holds it.
+
+        A session that failed to acquire the lock must not unlink the holder's
+        lock file, or a third session would acquire a fresh lock unnoticed.
+        """
         try:
             if self._lock_fd is not None:
                 fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
                 os.close(self._lock_fd)
                 self._lock_fd = None
-            if self._lock_path.exists():
-                self._lock_path.unlink()
+                if self._lock_path.exists():
+                    self._lock_path.unlink()
         except OSError:
             pass
 
