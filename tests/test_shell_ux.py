@@ -125,17 +125,17 @@ class TestMainDispatch:
 
     def test_run_exit_code_propagates(self, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["passclip", "run", "e", "--", "cmd"])
-        with patch("passclip.cmd_run", return_value=7) as run:
-            with pytest.raises(SystemExit) as exc:
-                main()
+        with patch("passclip.cmd_run", return_value=7) as run, \
+                pytest.raises(SystemExit) as exc:
+            main()
         run.assert_called_once_with("e", ["cmd"])
         assert exc.value.code == 7
 
     def test_ctrl_c_exits_130_gracefully(self, monkeypatch, capsys):
         monkeypatch.setattr(sys, "argv", ["passclip"])
-        with patch("passclip._start_shell", side_effect=KeyboardInterrupt):
-            with pytest.raises(SystemExit) as exc:
-                main()
+        with patch("passclip._start_shell", side_effect=KeyboardInterrupt), \
+                pytest.raises(SystemExit) as exc:
+            main()
         assert exc.value.code == 130
         assert "Interrupted" in capsys.readouterr().out
 
