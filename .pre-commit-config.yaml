@@ -1,5 +1,5 @@
 repos:
   - repo: https://github.com/rxb06/Credactor
-    rev: v2.2.2
+    rev: 7725e987aa6f0d9d57481ccf1ea5656ad6fd9146  # v2.4.0 — keep in sync with credactor pin in requirements-ci.txt
     hooks:
       - id: credactor

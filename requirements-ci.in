@@ -1,14 +1,19 @@
 # CI/build dependencies — used by .github/workflows/ci.yml and publish.yml
-# Regenerate: pip-compile --generate-hashes --allow-unsafe requirements-ci.in > requirements-ci.txt
+# Regenerate: pip-compile --allow-unsafe --generate-hashes --output-file=requirements-ci.txt requirements-ci.in
 # NOTE: tomli and exceptiongroup are backports needed on Python <3.11/<3.11 respectively.
 #       pip-compile on 3.11+ omits them, but CI runs on 3.10 which needs them.
 build
 pytest>=8.0
 ruff>=0.5
 rich>=13.0
-cryptography>=41.0
+cryptography>=46.0.7
 pyperclip>=1.8
 pyotp>=2.8
 tomli>=1.1.0
 exceptiongroup>=1.0
 credactor>=2.3
+# Build backend, pinned + hashed so `python -m build --no-isolation` never
+# pulls an unverified setuptools at release time (supply-chain: M7)
+setuptools>=77.0
+# Dependency CVE scanner, installed via this hashed lockfile like everything else (L12)
+pip-audit>=2.10
