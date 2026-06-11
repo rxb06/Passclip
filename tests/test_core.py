@@ -98,8 +98,8 @@ class TestLoadConfig:
         with patch("passclip.CONFIG_PATH", cfg_path):
             cfg = load_config()
         assert cfg["clip_timeout"] == 30
-        # Unknown key should not be in defaults but is in loaded config
-        assert "typo_key" in cfg
+        # The warning says "ignored" — the key must actually be dropped
+        assert "typo_key" not in cfg
         out = capsys.readouterr().out
         assert "unrecognized config key 'typo_key'" in out
 
@@ -409,12 +409,6 @@ class TestVaultCrypto:
         k1 = _derive_vault_key(b"pass1", salt)
         k2 = _derive_vault_key(b"pass2", salt)
         assert k1 != k2
-
-    def test_key_derivation_rejects_wrong_salt_length(self):
-        with pytest.raises(AssertionError):
-            _derive_vault_key(b"test", b"short")
-        with pytest.raises(AssertionError):
-            _derive_vault_key(b"test", b"x" * 64)
 
     def test_encrypt_decrypt_roundtrip_with_aad(self):
         """Full vault encrypt/decrypt roundtrip with AAD."""

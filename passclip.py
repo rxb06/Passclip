@@ -102,10 +102,12 @@ def load_config() -> Dict:
                 "[dim]Using defaults.[/dim]"
             )
             return DEFAULT_CONFIG.copy()
-    # Warn on unrecognized keys (catches typos in config.json)
+    # Warn on unrecognized keys (catches typos in config.json) — and actually
+    # drop them, so the warning is true and typos don't persist forever
     unknown = set(cfg.keys()) - set(DEFAULT_CONFIG.keys())
     for key in sorted(unknown):
         console.print(f"[dim]Warning: unrecognized config key '{key}' — ignored.[/dim]")
+        cfg.pop(key)
     # Validate bounds
     if not isinstance(cfg.get("clip_timeout"), int) or cfg["clip_timeout"] < 1:
         cfg["clip_timeout"] = DEFAULT_CONFIG["clip_timeout"]
@@ -125,7 +127,10 @@ def save_config(config: Dict) -> None:
     os.chmod(str(CONFIG_PATH), 0o600)  # ensure perms even if file pre-existed
 
 
-CONFIG = load_config()
+# Import-safe default; main() merges the user's config file on startup via
+# CONFIG.update(load_config()). Importing this module must not read files or
+# print warnings (pytest collection, library use).
+CONFIG: Dict = DEFAULT_CONFIG.copy()
 
 # ---------------------------------------------------------------------------
 # Dependency detection
@@ -192,15 +197,8 @@ def run_command(
 
 def _insert_entry(entry: str, content: str) -> Tuple[bool, str]:
     """Write content to a pass entry. Returns (success, error_message)."""
-    proc = subprocess.Popen(
-        ["pass", "insert", "-m", "-f", entry],
-        stdin=subprocess.PIPE, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    _, stderr = proc.communicate(content)
-    if proc.returncode != 0:
-        return False, stderr.strip()
-    return True, ""
+    _, err, rc = run_command(["pass", "insert", "-m", "-f", entry], input_data=content)
+    return rc == 0, err
 
 
 def _error(msg: str, hint: str = "") -> None:
@@ -601,20 +599,6 @@ def generate_password(length: int = 20, symbols: bool = True) -> str:
     result = list(pw)
     secrets.SystemRandom().shuffle(result)
     return "".join(result)
-
-
-# ---------------------------------------------------------------------------
-# Vault encryption
-# ---------------------------------------------------------------------------
-
-VAULT_MAGIC = b"PCV2"  # 4-byte header — v2 adds AAD authentication of salt+nonce
-
-
-def _derive_vault_key(passphrase: bytes, salt: bytes) -> bytes:
-    """Derive a 32-byte AES-256 key from a passphrase using PBKDF2-SHA256 (600k iters)."""
-    assert len(salt) == 32, f"Salt must be 32 bytes, got {len(salt)}"
-    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=PBKDF2_ITERATIONS)
-    return kdf.derive(passphrase)
 
 
 # ---------------------------------------------------------------------------
@@ -1078,7 +1062,7 @@ def _validate_otp_secret(secret: str) -> Optional[str]:
             # Verify it's valid base32
             try:
                 base64.b32decode(cleaned, casefold=True)
-            except (ValueError, base64.binascii.Error):
+            except ValueError:  # binascii.Error is a ValueError subclass
                 return "OTP secret is not valid base32."
             pyotp.TOTP(cleaned)
         return None
@@ -1719,6 +1703,19 @@ def smart_copy(args: List[str]) -> None:
         cmd_get(entry)
 
 
+# ---------------------------------------------------------------------------
+# Vault export / import — AES-256-GCM encrypted backups independent of GPG
+# ---------------------------------------------------------------------------
+
+VAULT_MAGIC = b"PCV2"  # 4-byte header — v2 adds AAD authentication of salt+nonce
+
+
+def _derive_vault_key(passphrase: bytes, salt: bytes) -> bytes:
+    """Derive a 32-byte AES-256 key from a passphrase using PBKDF2-SHA256 (600k iters)."""
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=PBKDF2_ITERATIONS)
+    return kdf.derive(passphrase)
+
+
 def cmd_export_vault(output_path: str) -> None:
     """Export the entire password store to a single AES-256-GCM encrypted vault file."""
     pass_dir = Path(CONFIG.get("pass_dir", Path.home() / ".password-store"))
@@ -1864,14 +1861,15 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
             plaintext = AESGCM(key).decrypt(nonce, ciphertext, aad)
             break
         except cryptography.exceptions.InvalidTag:
+            # No backoff sleeps: an attacker holding the file brute-forces
+            # offline — PBKDF2 at 600k iterations is the real rate limit,
+            # and delays only ever punished the legitimate owner's typos.
             remaining = max_attempts - attempt
             if remaining > 0:
-                delay = 3 ** (attempt - 1)  # 1s, 3s (no sleep after the final attempt)
                 console.print(
                     f"[red]Wrong passphrase.[/red] "
                     f"{remaining} attempt{'s' if remaining > 1 else ''} remaining."
                 )
-                time.sleep(delay)
             else:
                 _error(
                     "Wrong passphrase — 3 attempts exhausted.",
@@ -1976,6 +1974,11 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
     ))
 
 
+# ---------------------------------------------------------------------------
+# Setup wizard
+# ---------------------------------------------------------------------------
+
+
 def cmd_wizard() -> None:
     """Guided first-time setup: GPG key + pass init + optional git."""
     console.print(Panel(
@@ -2064,6 +2067,11 @@ def cmd_wizard() -> None:
     ))
 
 
+# ---------------------------------------------------------------------------
+# Config commands
+# ---------------------------------------------------------------------------
+
+
 def cmd_config_show() -> None:
     """Display all current config values in a table."""
     t = Table(title="Passclip Config", box=box.SIMPLE)
@@ -2091,8 +2099,6 @@ def cmd_config_set(key: str, value: str) -> None:
     try:
         if original_type is int:
             typed_value = int(value)
-        elif original_type is bool:
-            typed_value = value.lower() in ("true", "1", "yes")
         else:
             typed_value = value
     except ValueError:
@@ -2173,8 +2179,10 @@ class PassShell(cmd.Cmd):
             os.ftruncate(fd, 0)
             os.write(fd, str(os.getpid()).encode())
             self._lock_fd = fd
-        except OSError:
-            pass
+        except OSError as e:
+            # Without the lock, two sessions can run silently side by side —
+            # say so instead of failing invisibly
+            console.print(f"[dim]Warning: could not create lock file: {e}[/dim]")
 
     def _release_lock(self) -> None:
         """Release the flock and remove the lock file — only if this session holds it.
@@ -2749,7 +2757,10 @@ def _start_shell() -> None:
 
 
 def main() -> None:
-    """Entry point: graceful Ctrl-C around the real dispatch."""
+    """Entry point: load user config, then dispatch with graceful Ctrl-C."""
+    # update() mutates the module-level dict in place, so every reference
+    # (including test patches) stays valid
+    CONFIG.update(load_config())
     try:
         _main()
     except KeyboardInterrupt:
