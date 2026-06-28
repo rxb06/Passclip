@@ -1,10 +1,10 @@
 repos:
   - repo: https://github.com/rxb06/Credactor
-    rev: 7725e987aa6f0d9d57481ccf1ea5656ad6fd9146  # v2.4.0 — keep in sync with credactor pin in requirements-ci.txt
+    rev: 1af329b30acee67f9e271be3c8b13e280e01e531  # v2.5.0 — keep in sync with credactor pin in requirements-ci.txt
     hooks:
       - id: credactor
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: 3b3f7c3f57fe9925356faf5fe6230835138be230  # v0.15.17 — keep in sync with ruff pin in requirements-ci.txt
+    rev: c59bba8fb259db0fec2bbb77ad8ba51ea7341b56  # v0.15.20 — keep in sync with ruff pin in requirements-ci.txt
     hooks:
       - id: ruff-check
         args: [--fix]
