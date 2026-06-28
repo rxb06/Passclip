@@ -8,7 +8,7 @@ rich>=15.0
 cryptography>=48.0.1
 pyperclip>=1.11
 pyotp>=2.9
-credactor>=2.4
+credactor>=2.5
 # Build backend, pinned + hashed so `python -m build --no-isolation` never
 # pulls an unverified setuptools at release time (supply-chain: M7)
 setuptools>=77.0
