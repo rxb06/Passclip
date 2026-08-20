@@ -6,6 +6,26 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ---
 
+## [1.4.0] — 2026-08-20
+
+A dependency release. No functional changes to Passclip itself — `passclip.py` is byte-identical to 1.3.0 apart from the version string — but two advisories affecting pinned dependencies are closed, so upgrading is worthwhile for anyone installing from PyPI.
+
+### Security
+
+- **`cryptography` 49.0.0 → 50.0.0** — GHSA-g6cj-pr64-35w5 / CVE-2026-69247 (high). PKCS#7 `EnvelopedData` decryption exposed a Bleichenbacher oracle through distinguishable errors and timing. Passclip never reaches the affected code path — it uses only `AESGCM`, `PBKDF2HMAC` and `hashes.SHA256` — but the vulnerable range is `>=44.0.0,<50.0.0`, which the previous pin sat inside. The runtime floor in `pyproject.toml` moves to `cryptography>=50.0.0` as well, so a fresh install from PyPI cannot resolve a version carrying the advisory.
+- **`setuptools` 82.0.1 → 84.0.0** — GHSA-h35f-9h28-mq5c / CVE-2026-59890 (moderate). `MANIFEST.in` exclusion rules were matched without Unicode normalization, so on macOS APFS/HFS+ an NFD filename could bypass an NFC exclusion rule and leak into a published sdist. Passclip has no `MANIFEST.in`, so nothing was ever leaked from this repo; 83.0.0 is the fix and 84.0.0 is current.
+
+`pip-audit` reports no known vulnerabilities against the regenerated lockfile.
+
+### Dependencies and tooling
+
+- `ruff` 0.15.20 → 0.16.4, with the pre-commit hook rev kept in sync. Note that ruff 0.16 formats Python code blocks inside Markdown by default, which widens `ruff format --check .` from 12 files to 21; one documentation code block was reflowed to match.
+- `build` stays at 1.5.0. The proposed 1.5.1 is yanked on PyPI ("Considers breaking changes, will discuss re-releasing as a new major version").
+- Pinned GitHub Actions: `actions/checkout` → v7.0.1, `actions/setup-python` → v7.0.0 (a major bump that only drops the `pip-install` input, which this repo never used), `github/codeql-action/upload-sarif` → v4.37.7, `pypa/gh-action-pypi-publish` → v1.14.2.
+- The hashed CI lockfile was regenerated in a single resolution rather than merging the dependency bumps one at a time, which would break the `--require-hashes` install by rewriting one package's hashes against a stale transitive set.
+
+---
+
 ## [1.3.0] — 2026-06-11
 
 The remediation release: every finding from the June 2026 security review and code-quality review, fixed across nine phases. **Support for all versions before 1.3 ends with this release** — upgrade unconditionally.

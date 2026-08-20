@@ -333,6 +333,7 @@ PASS_URL=https://api.stripe.com
 Your code reads them:
 ```python
 import os
+
 stripe.api_key = os.environ["PASS_PASSWORD"]
 ```
 
