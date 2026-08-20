@@ -42,7 +42,7 @@ classifiers = [
 ]
 dependencies = [
     "rich>=15.0",
-    "cryptography>=48.0.1",  # floor = current line; no upper bound by policy
+    "cryptography>=50.0.0",  # floor = current line; no upper bound by policy
 ]
 
 [project.optional-dependencies]

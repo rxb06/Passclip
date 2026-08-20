@@ -3,14 +3,14 @@
 # (Python floor is >=3.11, so tomli and exceptiongroup are stdlib — no backports needed.)
 build
 pytest>=9.0
-ruff>=0.15
+ruff>=0.16
 rich>=15.0
-cryptography>=48.0.1
+cryptography>=50.0.0
 pyperclip>=1.11
 pyotp>=2.9
 credactor>=2.5
 # Build backend, pinned + hashed so `python -m build --no-isolation` never
 # pulls an unverified setuptools at release time (supply-chain: M7)
-setuptools>=77.0
+setuptools>=83.0
 # Dependency CVE scanner, installed via this hashed lockfile like everything else (L12)
 pip-audit>=2.10
