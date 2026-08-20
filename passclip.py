@@ -28,7 +28,7 @@ Shell shortcuts (inside the interactive shell):
   o gmail                           # Copy OTP code (fuzzy)
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 import argparse
 import cmd
