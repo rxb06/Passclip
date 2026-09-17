@@ -89,10 +89,25 @@ MAX_ENTRY_NAME_LEN = 200
 MAX_PATH_DEPTH = 10
 PBKDF2_ITERATIONS = 600_000
 CONFIG_PATH = Path.home() / ".config" / "passclip" / "config.json"
+
+
+def _default_store_dir() -> str:
+    """The store to use when `config pass_dir` has not been set.
+
+    `pass` itself reads $PASSWORD_STORE_DIR, and docs/setup.md offers it as an
+    alternative to `config pass_dir`, so it has to be the default here too —
+    otherwise passclip would read and write its own default while `pass` used
+    the environment, which is the split-brain store this default exists to
+    avoid. An explicit pass_dir in config.json still wins, being the more
+    specific setting of the two.
+    """
+    return os.environ.get("PASSWORD_STORE_DIR") or str(Path.home() / ".password-store")
+
+
 DEFAULT_CONFIG: dict = {
     "clip_timeout": 45,
     "default_password_length": 20,
-    "pass_dir": str(Path.home() / ".password-store"),
+    "pass_dir": _default_store_dir(),
 }
 
 # Minimum accepted value per numeric key. One table, so `config set` and
@@ -1596,14 +1611,27 @@ def _backup_entry(entry: str) -> tuple[Path | None, str | None]:
         return None, error or "entry is empty"
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe = entry.replace("/", "_")
-    backup = backup_dir / f"{safe}_{ts}.bak"
-    try:
-        fd = os.open(str(backup), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-    except OSError as e:
-        return None, str(e)
-    return backup, None
+    # Flattening '/' to '_' is not injective: 'x/a/b_c' and 'x/a_b/c' both give
+    # 'x_a_b_c'. A recursive delete backs both up within the same second, so
+    # O_TRUNC on a fixed name would silently overwrite the first backup and
+    # then `pass rm -r` would delete both secrets. O_EXCL makes the collision
+    # an error instead of data loss, and the suffix resolves it.
+    for attempt in range(1, 1000):
+        suffix = "" if attempt == 1 else f"-{attempt}"
+        backup = backup_dir / f"{safe}_{ts}{suffix}.bak"
+        try:
+            fd = os.open(str(backup), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        except OSError as e:
+            return None, str(e)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+        except OSError as e:
+            return None, str(e)
+        return backup, None
+    return None, "could not find a free backup filename"
 
 
 def _preview_entry_metadata(entry: str) -> None:
@@ -2297,7 +2325,11 @@ def cmd_gpg_list() -> None:
 def cmd_gpg_gen() -> None:
     """Generate a new GPG key (interactive)."""
     console.print("[yellow]Tip: RSA 4096, no expiry is recommended.[/yellow]")
-    run_command(["gpg", "--full-generate-key"], interactive=True)
+    _, _, rc = run_command(["gpg", "--full-generate-key"], interactive=True)
+    if rc != 0:
+        # Cancelling the gpg prompt is a failure: scripted setup must not read
+        # "no key was generated" as success
+        _error(f"gpg exited with status {rc} — no key was generated.")
 
 
 def cmd_init(key_id: str | None = None) -> None:
@@ -2691,9 +2723,23 @@ class PassShell(cmd.Cmd):
     def do_delete(self, arg: str) -> None:
         """delete [entry] [--force|-f]  Delete a password entry."""
         parts = _split_args(arg)
-        force = bool({"--force", "-f"} & set(parts))
-        names = [p for p in parts if not p.startswith("-")]
-        cmd_delete(names[0] if names else None, force=force)
+        entry, force = None, False
+        usage = escape("Usage: delete [entry] [--force|-f]")
+        for p in parts:
+            # Stricter than the other shell commands on purpose: dropping a
+            # mistyped flag here would delete the entry rather than print the
+            # wrong thing
+            if p in ("--force", "-f"):
+                force = True
+            elif p.startswith("-"):
+                _error(f"Unknown flag: {escape(p)}", usage)
+                return
+            elif entry is None:
+                entry = p
+            else:
+                _error(f"Unexpected argument: {escape(p)}", usage)
+                return
+        cmd_delete(entry, force=force)
 
     complete_delete = _complete_entries
 
