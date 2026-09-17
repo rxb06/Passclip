@@ -53,4 +53,4 @@ complete -c passclip -f -n '__fish_seen_subcommand_from import' -l format -a 'au
 complete -c passclip -f -n '__fish_seen_subcommand_from import' -l dry-run -d 'Preview without writing'
 
 # Config keys
-complete -c passclip -f -n '__fish_seen_subcommand_from config' -a 'clip_timeout default_password_length default_mode pass_dir'
+complete -c passclip -f -n '__fish_seen_subcommand_from config' -a 'clip_timeout default_password_length pass_dir'

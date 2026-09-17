@@ -3,6 +3,7 @@ NTH-6): the nine commands that existed twice (shell + CLI) now share one
 cmd_* implementation, and secret/entry values render literally."""
 
 import sys
+from pathlib import Path
 from unittest.mock import call, patch
 
 import pytest
@@ -54,9 +55,13 @@ class TestCmdDelete:
     def test_backs_up_before_deleting(self):
         manager = []
         with (
+            patch("passclip.get_all_entries", return_value=["web/test"]),
             patch("passclip._preview_entry_metadata"),
             patch("passclip.Confirm.ask", return_value=True),
-            patch("passclip._backup_entry", side_effect=lambda e: manager.append("backup") or None),
+            patch(
+                "passclip._backup_entry",
+                side_effect=lambda e: (manager.append("backup") or Path("/tmp/b.bak"), None),
+            ),
             patch(
                 "passclip.run_command",
                 side_effect=lambda *a, **k: manager.append("rm") or ("", "", 0),
@@ -67,18 +72,22 @@ class TestCmdDelete:
 
     def test_force_skips_preview_and_confirm(self):
         with (
+            patch("passclip.get_all_entries", return_value=["web/test"]),
             patch("passclip._preview_entry_metadata") as preview,
             patch("passclip.Confirm.ask") as confirm,
-            patch("passclip._backup_entry", return_value=None),
+            patch("passclip._backup_entry", return_value=(Path("/tmp/b.bak"), None)),
             patch("passclip.run_command", return_value=("", "", 0)) as run,
         ):
             cmd_delete("web/test", force=True)
         preview.assert_not_called()
         confirm.assert_not_called()
-        run.assert_called_once_with(["pass", "rm", "-r", "-f", "web/test"])
+        # no -r on a single entry: that is `pass rm`'s own guard against
+        # erasing a whole folder, and hardcoding it removed the guard
+        run.assert_called_once_with(["pass", "rm", "-f", "web/test"])
 
     def test_declined_confirm_deletes_nothing(self):
         with (
+            patch("passclip.get_all_entries", return_value=["web/test"]),
             patch("passclip._preview_entry_metadata"),
             patch("passclip.Confirm.ask", return_value=False),
             patch("passclip._backup_entry") as backup,
@@ -107,7 +116,7 @@ class TestBothFrontendsShareImplementations:
         # (shell line, cli argv, patched cmd, expected call)
         (
             "do_delete",
-            "web/x",
+            "web/x --force",
             ["delete", "web/x", "--force"],
             "cmd_delete",
             call("web/x", force=True),
@@ -125,8 +134,8 @@ class TestBothFrontendsShareImplementations:
     def test_shell_wrapper_delegates(self, method, arg, argv, cmd, expected):
         with patch(f"passclip.{cmd}") as target:
             getattr(_shell(), method)(arg)
-        shell_args = target.call_args
-        assert shell_args is not None, f"{method} must delegate to {cmd}"
+        assert target.call_args is not None, f"{method} must delegate to {cmd}"
+        assert target.call_args == expected, f"{method} must pass its arguments through"
 
     @pytest.mark.parametrize(
         "method,arg,argv,cmd,expected", CASES, ids=[c[3] + "-cli" for c in CASES]

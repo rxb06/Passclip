@@ -28,7 +28,7 @@ Shell shortcuts (inside the interactive shell):
   o gmail                           # Copy OTP code (fuzzy)
 """
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 import argparse
 import cmd
@@ -40,6 +40,7 @@ import hmac
 import io
 import json
 import os
+import re
 import readline
 import secrets
 import shlex
@@ -65,6 +66,13 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
 console = Console()
+# Errors go to stderr, never stdout: `get --field` writes the raw secret to
+# stdout, and a script capturing it must not capture an error message instead.
+err_console = Console(stderr=True)
+
+# Set by _error(). main() turns it into a non-zero exit status so failures are
+# visible to `set -e` scripts; the interactive shell resets it on exit.
+_ERROR_SEEN = False
 
 
 # Ctrl-C handling lives in main(): a module-level SIGINT handler that calls
@@ -87,6 +95,25 @@ DEFAULT_CONFIG: dict = {
     "pass_dir": str(Path.home() / ".password-store"),
 }
 
+# Minimum accepted value per numeric key. One table, so `config set` and
+# load_config can never drift apart on what counts as a legal value.
+CONFIG_MINIMUMS: dict[str, int] = {
+    "clip_timeout": 1,
+    "default_password_length": 8,
+}
+
+
+def _config_value_error(key: str, value) -> str | None:
+    """Return an error message if `value` is out of bounds for `key`, else None."""
+    minimum = CONFIG_MINIMUMS.get(key)
+    if minimum is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        return f"'{key}' must be an integer."
+    if value < minimum:
+        return f"'{key}' must be at least {minimum}."
+    return None
+
 
 def load_config() -> dict:
     """Load config from disk, merged with defaults. Validates value bounds."""
@@ -107,12 +134,10 @@ def load_config() -> dict:
     for key in sorted(unknown):
         console.print(f"[dim]Warning: unrecognized config key '{key}' — ignored.[/dim]")
         cfg.pop(key)
-    # Validate bounds
-    if not isinstance(cfg.get("clip_timeout"), int) or cfg["clip_timeout"] < 1:
-        cfg["clip_timeout"] = DEFAULT_CONFIG["clip_timeout"]
-    pw_len = cfg.get("default_password_length")
-    if not isinstance(pw_len, int) or pw_len < 8:
-        cfg["default_password_length"] = DEFAULT_CONFIG["default_password_length"]
+    # Validate bounds — an out-of-range value on disk falls back to the default
+    for key in CONFIG_MINIMUMS:
+        if _config_value_error(key, cfg.get(key)):
+            cfg[key] = DEFAULT_CONFIG[key]
     return cfg
 
 
@@ -138,9 +163,10 @@ CONFIG: dict = DEFAULT_CONFIG.copy()
 
 def check_dependencies() -> dict[str, bool]:
     """Detect which optional tools and packages are available."""
-    deps: dict[str, bool] = {}
-    for tool in ["pass", "gpg", "fzf", "git"]:
-        deps[tool] = shutil.which(tool) is not None
+    # Only tools whose availability actually changes behaviour: fzf selects the
+    # picker below. pass/gpg/git are reported by run_command when they are
+    # missing, at the point of use, so a mid-session install is picked up.
+    deps: dict[str, bool] = {"fzf": shutil.which("fzf") is not None}
     try:
         import pyperclip  # noqa: F401
 
@@ -163,6 +189,25 @@ DEPS = check_dependencies()
 # ---------------------------------------------------------------------------
 
 
+# Only `pass` and `gpg` are ever argv[0] of a run_command call
+_INSTALL_HINTS = {
+    "pass": "brew install pass  |  sudo apt install pass",
+    "gpg": "brew install gnupg  |  sudo apt install gnupg2",
+}
+
+
+def _child_env() -> dict[str, str]:
+    """Environment for child processes, pinned to the configured password store.
+
+    Without this, `pass` falls back to $PASSWORD_STORE_DIR or ~/.password-store
+    while passclip's own filesystem reads use config's pass_dir — so a user with
+    a non-default store would list one store and read/write another.
+    """
+    env = os.environ.copy()
+    env["PASSWORD_STORE_DIR"] = str(CONFIG.get("pass_dir", Path.home() / ".password-store"))
+    return env
+
+
 def run_command(
     command_parts: list[str],
     interactive: bool = False,
@@ -176,7 +221,7 @@ def run_command(
     """
     try:
         if interactive:
-            result = subprocess.run(command_parts)
+            result = subprocess.run(command_parts, env=_child_env())
             return "", "", result.returncode
         result = subprocess.run(
             command_parts,
@@ -184,12 +229,22 @@ def run_command(
             capture_output=True,
             input=input_data,
             check=False,
+            env=_child_env(),
         )
         stdout = result.stdout.strip() if strip else result.stdout
         return stdout, result.stderr.strip(), result.returncode
+    except UnicodeDecodeError:
+        # text=True decodes as UTF-8; UnicodeDecodeError is a ValueError, so it
+        # would otherwise escape every handler below and abort whole-store scans
+        # (health, export-vault) on a single latin-1 entry.
+        return "", f"Output of '{command_parts[0]}' is not valid UTF-8.", 1
     except FileNotFoundError:
         name = command_parts[0] if command_parts else "unknown"
-        return "", f"Command not found: '{name}'. Is it installed and in PATH?", 127
+        msg = f"Command not found: '{name}'. Is it installed and in PATH?"
+        hint = _INSTALL_HINTS.get(name)
+        if hint:
+            msg += f" Install it with: {hint}"
+        return "", msg, 127
     except PermissionError as e:
         return "", f"Permission denied running '{command_parts[0]}': {e}", 126
     except OSError as e:
@@ -203,10 +258,12 @@ def _insert_entry(entry: str, content: str) -> tuple[bool, str]:
 
 
 def _error(msg: str, hint: str = "") -> None:
-    """Print a consistently formatted error message."""
-    console.print(f"[red]Error:[/red] {msg}")
+    """Print a consistently formatted error message to stderr and flag failure."""
+    global _ERROR_SEEN
+    _ERROR_SEEN = True
+    err_console.print(f"[red]Error:[/red] {msg}")
     if hint:
-        console.print(f"[dim]{hint}[/dim]")
+        err_console.print(f"[dim]{hint}[/dim]")
 
 
 def _split_args(arg: str) -> list[str]:
@@ -402,8 +459,11 @@ _NATIVE_CLEAR_SCRIPT = (
 )
 
 
-def _spawn_clipboard_clear(text: str, timeout: int, mechanism: str) -> None:
+def _spawn_clipboard_clear(text: str, timeout: int, mechanism: str) -> bool:
     """Spawn a detached process that clears the clipboard after `timeout` seconds.
+
+    Returns True only if the clearer was actually started — the caller must not
+    promise an auto-clear that will never happen.
 
     A daemon thread would be killed the instant the CLI process exits after
     copying.  This subprocess uses start_new_session=True so it survives the
@@ -420,11 +480,11 @@ def _spawn_clipboard_clear(text: str, timeout: int, mechanism: str) -> None:
     else:
         tools = _CLIPBOARD_TOOLS.get(mechanism)
         if not tools:
-            return
+            return False
         script = _NATIVE_CLEAR_SCRIPT.format(copy_cmd=tools["copy"], paste_cmd=tools["paste"])
 
     env = os.environ.copy()
-    env["_PASSCLIP_CLIP_TIMEOUT"] = str(int(timeout))
+    env["_PASSCLIP_CLIP_TIMEOUT"] = str(max(1, int(timeout)))
     try:
         proc = subprocess.Popen(
             [sys.executable, "-c", script],
@@ -436,12 +496,13 @@ def _spawn_clipboard_clear(text: str, timeout: int, mechanism: str) -> None:
             close_fds=True,
         )
     except (FileNotFoundError, OSError):
-        return
+        return False
     try:
         proc.stdin.write(text.encode("utf-8", "surrogatepass"))
         proc.stdin.close()
     except (BrokenPipeError, OSError):
-        pass
+        return False
+    return True
 
 
 def copy_to_clipboard(text: str, timeout: int | None = None) -> bool:
@@ -462,8 +523,19 @@ def copy_to_clipboard(text: str, timeout: int | None = None) -> bool:
         for tool, cmds in _CLIPBOARD_TOOLS.items():
             if shutil.which(tool):
                 try:
+                    # Explicit UTF-8 bytes, not text=True: the clearer compares
+                    # against utf-8 bytes, and under a non-UTF-8 locale a
+                    # non-ASCII password would never match and never be cleared.
+                    # DEVNULL, not capture_output: xclip/wl-copy fork a child
+                    # that holds the selection and inherits the pipes, so
+                    # reading them to EOF hangs until the selection is lost.
                     subprocess.run(
-                        cmds["copy"], input=text, text=True, check=True, capture_output=True
+                        cmds["copy"],
+                        input=text.encode("utf-8", "surrogatepass"),
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=5,
                     )
                     mechanism = tool
                     break
@@ -471,17 +543,22 @@ def copy_to_clipboard(text: str, timeout: int | None = None) -> bool:
                     continue
 
     if mechanism is None:
-        console.print(
-            "[red]No clipboard tool found.[/red] "
-            "Install pyperclip: [cyan]pip install pyperclip[/cyan]"
+        _error(
+            "No clipboard tool found.",
+            "Install pyperclip: [cyan]pip install pyperclip[/cyan]",
         )
         return False
 
-    console.print(
-        f"[green]Copied to clipboard.[/green] Auto-clearing in [bold]{timeout}s[/bold]..."
-    )
-
-    _spawn_clipboard_clear(text, timeout, mechanism)
+    if _spawn_clipboard_clear(text, timeout, mechanism):
+        console.print(
+            f"[green]Copied to clipboard.[/green] Auto-clearing in [bold]{timeout}s[/bold]..."
+        )
+    else:
+        console.print("[green]Copied to clipboard.[/green]")
+        console.print(
+            "[yellow]Warning: could not schedule the auto-clear — "
+            "clear your clipboard manually when you are done.[/yellow]"
+        )
     return True
 
 
@@ -516,13 +593,19 @@ def _read_clipboard() -> str | None:
 # ---------------------------------------------------------------------------
 
 
+# A field key is a single identifier-shaped token. Prose that happens to
+# contain ': ' ("Backup codes: ask ops") stays a note instead of silently
+# becoming a field that format_entry then hoists above the notes block.
+_FIELD_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}\Z")
+
+
 def parse_entry(content: str) -> dict[str, str]:
     """Parse a pass entry into a dict. First line is 'password', rest are 'key: value' pairs."""
     lines = content.splitlines()
     data: dict[str, str] = {"password": lines[0] if lines else ""}
     for line in lines[1:]:
-        if ": " in line:
-            key, _, value = line.partition(": ")
+        key, sep, value = line.partition(": ")
+        if sep and _FIELD_KEY_RE.match(key.strip()):
             data[key.strip().lower()] = value.strip()
         elif line.strip():
             data.setdefault("notes", "")
@@ -672,9 +755,13 @@ def _extract_otp_secret(data: dict[str, str]) -> str | None:
     otpauth:// value)."""
     secret = data.get("otp") or data.get("totp") or data.get("secret") or data.get("otpauth")
     if not secret:
+        # Fall back to a URI pasted into a free-form field. parse_entry folds
+        # every note line into one 'notes' blob, so match per line — returning
+        # the whole blob would hand _make_totp the URI plus every note after it.
         for val in data.values():
-            if val and val.startswith("otpauth://"):
-                return val
+            for line in (val or "").splitlines():
+                if line.startswith("otpauth://"):
+                    return line.strip()
     return secret
 
 
@@ -682,11 +769,16 @@ def _make_totp(secret: str):
     """Build a pyotp TOTP from either a raw base32 secret or an otpauth:// URI."""
     import pyotp
 
-    return (
+    otp = (
         pyotp.parse_uri(secret)
         if secret.startswith("otpauth://")
         else pyotp.TOTP(secret.upper().replace(" ", ""))
     )
+    # parse_uri also returns HOTP objects, which have no .now() — reject them
+    # here rather than as an AttributeError traceback at code-generation time.
+    if not isinstance(otp, pyotp.TOTP):
+        raise ValueError("Only TOTP secrets are supported (this URI is HOTP).")
+    return otp
 
 
 # ---------------------------------------------------------------------------
@@ -827,7 +919,9 @@ def cmd_insert(entry: str | None = None, structured: bool = True) -> None:
             )
             use_symbols = Confirm.ask("[dim]Include symbols?[/dim]", default=True)
             password = generate_password(length, use_symbols)  # credactor:ignore
-            console.print(f"[green]Generated:[/green] {password}")
+            # escape: generated passwords contain '[' and ']' freely, and an
+            # unescaped '[/xyz]' run is parsed as a rich closing tag and crashes
+            console.print(f"[green]Generated:[/green] {escape(password)}")  # credactor:ignore
         score, label, color = password_strength(password)
         console.print(f"  Strength: {strength_bar(score, color)} [dim]{label}[/dim]")
         with _no_history():
@@ -904,7 +998,13 @@ def cmd_generate(
     if not length:
         length = IntPrompt.ask("Length", default=CONFIG.get("default_password_length", 20))
 
-    args = ["pass", "generate", "-f"]
+    # -f on an existing entry rewrites the file to contain only the new
+    # password, destroying username/url/notes and any stored OTP seed. -i
+    # replaces the first line in place and is the only safe flag for a
+    # rotation; -f stays for genuinely new entries (it also skips a prompt
+    # that cannot be answered when stdin is not a terminal).
+    rotating = entry in get_all_entries()
+    args = ["pass", "generate", "-i" if rotating else "-f"]
     if no_symbols:
         args.append("-n")
     args += [entry, str(length)]
@@ -912,9 +1012,9 @@ def cmd_generate(
     out, err, rc = run_command(args)
     if rc != 0:
         if "No public key" in err or "encryption failed" in err:
-            console.print(
-                "[red]GPG encryption failed.[/red] "
-                "Run [bold]init[/bold] to set up your password store."
+            _error(
+                "GPG encryption failed.",
+                "Run [bold]init[/bold] to set up your password store.",
             )
         else:
             _error(escape(err))
@@ -1015,6 +1115,8 @@ def cmd_health() -> None:
             console.print(
                 f"  Group {i}: " + "  |  ".join(f"[cyan]{escape(e)}[/cyan]" for e in group)
             )
+        if len(dup_groups) > 10:
+            console.print(f"  [dim]… and {len(dup_groups) - 10} more duplicate groups[/dim]")
         console.print("[dim]  Tip: use unique passwords for each account[/dim]")
 
     if errors:
@@ -1026,7 +1128,7 @@ def cmd_health() -> None:
 def cmd_otp(entry: str | None = None) -> None:
     """Generate a TOTP code from a stored OTP secret."""
     if not DEPS.get("pyotp"):
-        console.print("[red]pyotp not installed.[/red] Run: [cyan]pip install pyotp[/cyan]")
+        _error("pyotp not installed.", "Run: [cyan]pip install pyotp[/cyan]")
         return
 
     if not entry:
@@ -1050,13 +1152,14 @@ def cmd_otp(entry: str | None = None) -> None:
         )
         return
 
+    # .now() must be inside the try: pyotp is lazy and does not touch the
+    # secret until then, so a bad secret raises here, not in the constructor.
     try:
-        totp = _make_totp(secret)
+        code = _make_totp(secret).now()
     except Exception as e:
         _error(f"Invalid OTP secret: {escape(str(e))}")
         return
 
-    code = totp.now()
     remaining = 30 - (int(time.time()) % 30)
     console.print(
         Panel(
@@ -1073,33 +1176,44 @@ def _validate_otp_secret(secret: str) -> str | None:
     """Validate an OTP secret string. Returns error message or None if valid."""
     import base64
 
-    import pyotp
-
+    if not secret.startswith("otpauth://"):
+        cleaned = secret.upper().replace(" ", "")
+        if len(cleaned) < 16:
+            return "OTP secret is too short (minimum 16 characters)."
+        # Pad before decoding: pyotp pads internally but base64.b32decode does
+        # not, so an ordinary 26-character seed would be rejected as invalid.
+        try:
+            base64.b32decode(cleaned + "=" * (-len(cleaned) % 8), casefold=True)
+        except ValueError:  # binascii.Error is a ValueError subclass
+            return "OTP secret is not valid base32."
+    # The real test is whether it can produce a code — pyotp is lazy, so a
+    # constructor that succeeds proves nothing.
     try:
-        if secret.startswith("otpauth://"):
-            parsed = pyotp.parse_uri(secret)
-            # Verify the parsed URI actually produced a usable TOTP
-            if not parsed.secret:
-                return "otpauth:// URI is missing the 'secret' parameter."
-        else:
-            cleaned = secret.upper().replace(" ", "")
-            if len(cleaned) < 16:
-                return "OTP secret is too short (minimum 16 characters)."
-            # Verify it's valid base32
-            try:
-                base64.b32decode(cleaned, casefold=True)
-            except ValueError:  # binascii.Error is a ValueError subclass
-                return "OTP secret is not valid base32."
-            pyotp.TOTP(cleaned)
-        return None
-    except (ValueError, TypeError, KeyError) as e:
+        _make_totp(secret).now()
+    except Exception as e:
         return str(e)
+    return None
+
+
+def _is_otp_field_line(line: str) -> bool:
+    """True if `line` is an OTP field that `otp --add` should replace.
+
+    'secret:' is an OTP alias but also an ordinary field name (an API key, say),
+    so it only counts when the value really is an OTP secret.
+    """
+    key, sep, value = line.partition(":")
+    if not sep:
+        return False
+    key = key.strip().lower()
+    if key in ("otp", "totp", "otpauth"):
+        return True
+    return key == "secret" and _validate_otp_secret(value.strip()) is None
 
 
 def cmd_otp_add(entry: str | None = None) -> None:
     """Add or update an OTP secret on an existing entry."""
     if not DEPS.get("pyotp"):
-        console.print("[red]pyotp not installed.[/red] Run: [cyan]pip install pyotp[/cyan]")
+        _error("pyotp not installed.", "Run: [cyan]pip install pyotp[/cyan]")
         return
 
     if not entry:
@@ -1161,11 +1275,12 @@ def cmd_otp_add(entry: str | None = None) -> None:
     # free-form by design; a parse/format roundtrip would lowercase keys,
     # reorder lines, and relocate notes, breaking other tools' expectations.
     lines = content.splitlines()
-    kept = lines[:1] + [
-        ln
-        for ln in lines[1:]
-        if not ln.lower().startswith(("otp:", "totp:", "secret:", "otpauth:"))
-    ]
+    replaced = [ln for ln in lines[1:] if _is_otp_field_line(ln)]
+    kept = lines[:1] + [ln for ln in lines[1:] if not _is_otp_field_line(ln)]
+    if replaced:
+        # Name the keys only — never echo the values, they are 2FA material
+        keys = ", ".join(sorted({ln.partition(":")[0].strip().lower() for ln in replaced}))
+        console.print(f"[yellow]Replacing existing OTP field(s): {escape(keys)}[/yellow]")
     new_content = "\n".join(kept + [f"otp: {secret}"]) + "\n"
     ok, err = _insert_entry(entry, new_content)
     if not ok:
@@ -1205,8 +1320,7 @@ def cmd_run(entry: str, command: list[str]) -> int:
     running.
     """
     if not command:
-        console.print("[red]No command supplied after entry.[/red]")
-        console.print("[dim]Usage: run <entry> -- <command>[/dim]")
+        _error("No command supplied after entry.", "Usage: run <entry> -- <command>")
         return 2
 
     content, error = get_entry_raw(entry)
@@ -1232,7 +1346,7 @@ def cmd_run(entry: str, command: list[str]) -> int:
         result = subprocess.run(command, env=env)
         return result.returncode
     except FileNotFoundError:
-        console.print(f"[red]Command not found:[/red] {escape(command[0])}")
+        _error(f"Command not found: {escape(command[0])}")
         return 127
     except KeyboardInterrupt:
         return 130
@@ -1245,7 +1359,7 @@ def cmd_sync() -> None:
         console.print(f"[dim]{action.capitalize()}ing...[/dim]")
         out, err, rc = run_command(["pass", "git", action])
         if rc != 0:
-            console.print(f"[red]{action.capitalize()} failed:[/red] {escape(err or out)}")
+            _error(f"{action.capitalize()} failed: {escape(err or out)}")
             return
         if out:
             console.print(escape(out))
@@ -1254,6 +1368,9 @@ def cmd_sync() -> None:
 
 def cmd_git_log(n: int = 10) -> None:
     """Show recent git history of the password store."""
+    # n is interpolated straight into a git flag: a negative value would
+    # produce '--5', which git reads as an unknown long option
+    n = max(1, min(int(n), 1000))
     out, err, rc = run_command(
         [
             "pass",
@@ -1296,7 +1413,7 @@ def _parse_csv_row(row: dict[str, str], fmt: str) -> dict[str, str]:
             "password": row.get("password", ""),
             "url": row.get("url", ""),
             "notes": row.get("extra", ""),
-            "otp": "",
+            "otp": row.get("totp", ""),
         }
     elif fmt == "1password":
         return {
@@ -1320,12 +1437,19 @@ def _parse_csv_row(row: dict[str, str], fmt: str) -> dict[str, str]:
         }
 
 
+def _fold_name_part(part: str) -> str:
+    """Fold one path component into characters validate_entry_name accepts."""
+    part = part.replace("/", "-").replace(" ", "_").replace("..", "-")
+    # Shell metacharacters and control characters are rejected by
+    # validate_entry_name; fold them here so an '&' in a source name costs the
+    # row a rename rather than the whole import
+    return "".join("-" if (c in "`$(){}|;&<>!\\" or ord(c) < 32) else c for c in part).lower()
+
+
 def _sanitize_entry_path(name: str, folder: str) -> str | None:
     """Sanitize and build entry path from name + folder. Returns None if invalid."""
-    safe_name = name.replace("/", "-").replace(" ", "_").replace("..", "-").lower()
-    safe_folder = (
-        folder.replace("/", "-").replace(" ", "_").replace("..", "-").lower() if folder else ""
-    )
+    safe_name = _fold_name_part(name)
+    safe_folder = _fold_name_part(folder) if folder else ""
     safe_name = safe_name.lstrip(".-") or "unnamed"
     safe_folder = safe_folder.lstrip(".-")
     entry_path = f"{safe_folder}/{safe_name}" if safe_folder else safe_name
@@ -1333,7 +1457,9 @@ def _sanitize_entry_path(name: str, folder: str) -> str | None:
     return entry_path if ok else None
 
 
-def cmd_import(filepath: str, fmt: str = "auto", dry_run: bool = False) -> None:
+def cmd_import(
+    filepath: str, fmt: str = "auto", dry_run: bool = False, force: bool = False
+) -> None:
     """
     Import passwords from a CSV export.
     Supports Bitwarden, LastPass, 1Password, and generic CSV formats.
@@ -1365,52 +1491,85 @@ def cmd_import(filepath: str, fmt: str = "auto", dry_run: bool = False) -> None:
     else:
         console.print(f"[bold]Importing[/bold] {filepath} [dim](format: {fmt})[/dim]")
 
-    imported = skipped = invalid = 0
+    imported = skipped = invalid = failed = 0
     existing = set(get_all_entries())
 
     try:
         with open(path, newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                fields = _parse_csv_row(row, fmt)
-                name = fields["name"]
-                password = fields["password"]
-
-                if not name or not password:
-                    skipped += 1
-                    continue
-
-                entry_path = _sanitize_entry_path(name, fields["folder"])
-                if not entry_path:
-                    invalid += 1
-                    console.print(f"  [yellow]⚠[/yellow] Invalid name: {escape(name)}")
-                    continue
-
-                if dry_run:
-                    dup = " [yellow](exists)[/yellow]" if entry_path in existing else ""
-                    console.print(f"  [dim]→[/dim] {escape(entry_path)}{dup}")
-                    imported += 1
-                    continue
-
-                if entry_path in existing:
-                    console.print(f"  [yellow]⚠[/yellow] {escape(entry_path)} (overwriting)")
-
-                data: dict[str, str] = {"password": password}
-                for key in ("username", "url", "notes", "otp"):
-                    if fields.get(key):
-                        data[key] = fields[key]
-
-                ok, err = _insert_entry(entry_path, format_entry(data))
-                if ok:
-                    imported += 1
-                    console.print(f"  [green]✓[/green] {escape(entry_path)}")
-                else:
-                    skipped += 1
-                    console.print(f"  [red]✗[/red] {escape(entry_path)}: {escape(err)}")
-
+            rows = list(csv.DictReader(f))
     except (csv.Error, UnicodeDecodeError) as e:
         _error(f"Failed to parse CSV: {e}")
         return
+    except OSError as e:
+        _error(f"Cannot read file: {e}")
+        return
+
+    # Plan every write before making any: two source rows can sanitize to the
+    # same path ('My Site', 'my site'), and a collision with the existing store
+    # destroys a live secret. Neither is recoverable once `pass insert -f` runs.
+    planned: list[tuple[str, dict[str, str]]] = []
+    used: set[str] = set()
+    for row in rows:
+        fields = _parse_csv_row(row, fmt)
+        name = fields["name"]
+        password = fields["password"]
+
+        if not name or not password:
+            skipped += 1
+            continue
+
+        entry_path = _sanitize_entry_path(name, fields["folder"])
+        if not entry_path:
+            invalid += 1
+            console.print(f"  [yellow]⚠[/yellow] Invalid name: {escape(name)}")
+            continue
+
+        if entry_path in used:
+            base, n = entry_path, 2
+            while f"{base}-{n}" in used or f"{base}-{n}" in existing:
+                n += 1
+            entry_path = f"{base}-{n}"
+            console.print(f"  [yellow]⚠[/yellow] {escape(name)} renamed to {escape(entry_path)}")
+        used.add(entry_path)
+
+        data: dict[str, str] = {"password": password}
+        for key in ("username", "url", "notes", "otp"):
+            if fields.get(key):
+                data[key] = fields[key]
+        planned.append((entry_path, data))
+
+    overwrites = [p for p, _ in planned if p in existing]
+    if overwrites and not dry_run and not force:
+        console.print(
+            f"\n[yellow]{len(overwrites)} entr"
+            f"{'y' if len(overwrites) == 1 else 'ies'} already in the store would be "
+            "replaced by the CSV:[/yellow]"
+        )
+        for p in overwrites[:10]:
+            console.print(f"  [cyan]{escape(p)}[/cyan]")
+        if len(overwrites) > 10:
+            console.print(f"  [dim]… and {len(overwrites) - 10} more[/dim]")
+        if not Confirm.ask("Overwrite them?", default=False):
+            console.print("[dim]Import cancelled.[/dim]")
+            return
+
+    for entry_path, data in planned:
+        if dry_run:
+            dup = " [yellow](exists)[/yellow]" if entry_path in existing else ""
+            console.print(f"  [dim]→[/dim] {escape(entry_path)}{dup}")
+            imported += 1
+            continue
+
+        if entry_path in existing:
+            console.print(f"  [yellow]⚠[/yellow] {escape(entry_path)} (overwriting)")
+
+        ok, err = _insert_entry(entry_path, format_entry(data))
+        if ok:
+            imported += 1
+            console.print(f"  [green]✓[/green] {escape(entry_path)}")
+        else:
+            failed += 1
+            console.print(f"  [red]✗[/red] {escape(entry_path)}: {escape(err)}")
 
     label = "Would import" if dry_run else "Done"
     parts = [f"{imported} imported"]
@@ -1418,24 +1577,33 @@ def cmd_import(filepath: str, fmt: str = "auto", dry_run: bool = False) -> None:
         parts.append(f"{skipped} skipped")
     if invalid:
         parts.append(f"{invalid} invalid")
+    if failed:
+        parts.append(f"{failed} failed")
     console.print(f"\n[bold green]{label}:[/bold green] {', '.join(parts)}.")
+    if failed:
+        # Entries that did not make it are silent data loss for a migration —
+        # the exit status has to say so
+        _error(f"{failed} entr{'y' if failed == 1 else 'ies'} could not be written.")
 
 
-def _backup_entry(entry: str) -> Path | None:
-    """Save entry content to ~/.config/passclip/backups/ before deletion."""
+def _backup_entry(entry: str) -> tuple[Path | None, str | None]:
+    """Save entry content to ~/.config/passclip/backups/. Returns (path, error)."""
     backup_dir = Path.home() / ".config" / "passclip" / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(backup_dir, 0o700)  # backup filenames embed entry paths — keep unlistable
-    content, _ = get_entry_raw(entry)
-    if content:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe = entry.replace("/", "_")
-        backup = backup_dir / f"{safe}_{ts}.bak"
+    content, error = get_entry_raw(entry)
+    if not content:
+        return None, error or "entry is empty"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe = entry.replace("/", "_")
+    backup = backup_dir / f"{safe}_{ts}.bak"
+    try:
         fd = os.open(str(backup), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(content)
-        return backup
-    return None
+    except OSError as e:
+        return None, str(e)
+    return backup, None
 
 
 def _preview_entry_metadata(entry: str) -> None:
@@ -1537,14 +1705,58 @@ def cmd_delete(entry: str | None, force: bool = False) -> None:
         entry = fuzzy_select(get_all_entries(), "Select entry to delete")
         if not entry:
             return
-    if not force:
-        _preview_entry_metadata(entry)
-        if not Confirm.ask(f"[red]Delete '{escape(entry)}'?[/red]", default=False):
+
+    # A name that is not an entry may still be a folder, and `pass rm -r` on a
+    # folder erases everything under it. Resolve what is actually at stake
+    # before prompting — 'delete web' must not read as 'delete web/gmail'.
+    entries = get_all_entries()
+    children = [e for e in entries if e.startswith(entry.rstrip("/") + "/")]
+    if entry in entries:
+        targets, recursive = [entry], False
+        if children:
+            # Deleting the file must not quietly take the folder of the same
+            # name with it; say what is being left behind
+            console.print(
+                f"[dim]Note: {len(children)} entries under '{escape(entry)}/' are kept. "
+                f"Delete them with: delete {escape(entry)}/[/dim]"
+            )
+    else:
+        targets, recursive = children, True
+        if not targets:
+            _error(
+                f"Entry '{escape(entry)}' not found.",
+                "Run [bold]ls[/bold] to see available entries.",
+            )
             return
-    backup = _backup_entry(entry)
-    if backup:
+
+    if not force:
+        if recursive:
+            console.print(
+                f"[yellow]'{escape(entry)}' is a folder containing {len(targets)} entries:[/yellow]"
+            )
+            for t in targets:
+                console.print(f"  [cyan]{escape(t)}[/cyan]")
+            prompt = f"[red]Delete all {len(targets)} entries under '{escape(entry)}'?[/red]"
+        else:
+            _preview_entry_metadata(entry)
+            prompt = f"[red]Delete '{escape(entry)}'?[/red]"
+        if not Confirm.ask(prompt, default=False):
+            return
+
+    # Back up every entry first. A failed backup (locked GPG agent) is exactly
+    # when the backup matters most, so it aborts rather than being ignored.
+    for t in targets:
+        backup, berr = _backup_entry(t)
+        if not backup:
+            _error(
+                f"Could not back up '{escape(t)}': {berr}",
+                "Delete aborted — nothing was removed.",
+            )
+            return
         console.print(f"[dim]Backup saved: {backup}[/dim]")
-    _, err, rc = run_command(["pass", "rm", "-r", "-f", entry])
+
+    args = ["pass", "rm", "-r", "-f", entry] if recursive else ["pass", "rm", "-f", entry]
+    _, err, rc = run_command(args)
     if rc == 0:
         console.print(f"[green]Deleted '{escape(entry)}'.[/green]")
     else:
@@ -1558,7 +1770,10 @@ def cmd_ls(path: str = "") -> None:
         return
     cmd_args = ["pass", "ls"] + ([path] if path else [])
     out, err, rc = run_command(cmd_args)
-    console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
+    if rc == 0:
+        console.print(escape(out))
+    else:
+        _error(escape(err))
 
 
 def cmd_find(term: str) -> None:
@@ -1567,7 +1782,10 @@ def cmd_find(term: str) -> None:
         _error("Search term cannot start with '-'.")
         return
     out, err, rc = run_command(["pass", "find", term])
-    console.print(escape(out) if rc == 0 else f"[red]{escape(err)}[/red]")
+    if rc != 0:
+        _error(escape(err))
+    else:
+        console.print(escape(out))
     if rc == 0:
         matches = [e for e in get_all_entries() if term.lower() in e.lower()]
         if matches:
@@ -1649,11 +1867,10 @@ def cmd_config(key: str | None, value: str | None) -> None:
         # falsy, not `is None`: the CLI's historical `config <key> ""`
         # is a read — an empty value must never become a write
         val = CONFIG.get(key)
-        console.print(
-            f"{escape(key)} = {val}"
-            if val is not None
-            else f"[red]Unknown key: {escape(key)}[/red]"
-        )
+        if val is None:
+            _error(f"Unknown key: {escape(key)}")
+        else:
+            console.print(f"{escape(key)} = {val}")
     else:
         cmd_config_set(key, value)
 
@@ -1721,7 +1938,7 @@ def smart_copy(args: list[str]) -> None:
             term = a
 
     if not term:
-        console.print("[red]Usage:[/red] passclip <search-term> [-u|-o|-s]")
+        _error(escape("Usage: passclip <search-term> [-u|-o|-s]"))
         return
 
     entry = _fuzzy_match(term)
@@ -1755,10 +1972,18 @@ def cmd_export_vault(output_path: str) -> None:
     """Export the entire password store to a single AES-256-GCM encrypted vault file."""
     pass_dir = Path(CONFIG.get("pass_dir", Path.home() / ".password-store"))
     if not pass_dir.exists():
-        console.print("[red]Password store not found.[/red]")
+        _error(f"Password store not found: {pass_dir}")
         return
 
     out = Path(output_path).expanduser().resolve()
+    # Check the destination before doing any work: mkstemp(dir=out.parent) would
+    # otherwise raise only after the passphrase prompt and the whole encryption
+    if not out.parent.is_dir():
+        _error(
+            f"Output directory does not exist: {out.parent}",
+            "Create it first, or choose another path.",
+        )
+        return
     if out.exists() and not Confirm.ask(
         f"[yellow]'{out}' already exists. Overwrite?[/yellow]", default=False
     ):
@@ -1767,7 +1992,7 @@ def cmd_export_vault(output_path: str) -> None:
     # Prompt for passphrase
     passphrase = Prompt.ask("Vault passphrase", password=True)
     if not passphrase:
-        console.print("[red]Passphrase cannot be empty.[/red]")
+        _error("Passphrase cannot be empty.")
         return
     # An attacker who has the vault file brute-forces it offline — PBKDF2
     # cannot save a tiny keyspace, so enforce a floor and warn on weak.
@@ -1785,7 +2010,7 @@ def cmd_export_vault(output_path: str) -> None:
     confirm = Prompt.ask("Confirm passphrase", password=True)
     # Compare bytes: compare_digest raises TypeError on non-ASCII str operands
     if not hmac.compare_digest(passphrase.encode("utf-8"), confirm.encode("utf-8")):
-        console.print("[red]Passphrases do not match.[/red]")
+        _error("Passphrases do not match.")
         return
 
     with Progress(
@@ -1799,6 +2024,7 @@ def cmd_export_vault(output_path: str) -> None:
         # Build in-memory tar.gz, skipping .git/
         buf = io.BytesIO()
         resolved_root = pass_dir.resolve()
+        entry_count = 0
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
             for item in pass_dir.rglob("*"):
                 # Skip the .git directory and everything inside it
@@ -1811,6 +2037,10 @@ def cmd_export_vault(output_path: str) -> None:
                     continue
                 arcname = Path(".password-store") / rel
                 tar.add(str(item), arcname=str(arcname), recursive=False)
+                # Count what actually went in, not every .gpg on disk — the
+                # skipped symlinks above are not in the vault
+                if item.is_file() and item.suffix == ".gpg":
+                    entry_count += 1
         plaintext = buf.getvalue()
 
         progress.update(task, description="Encrypting…")
@@ -1846,7 +2076,6 @@ def cmd_export_vault(output_path: str) -> None:
             raise
 
     size_kb = out.stat().st_size / 1024
-    entry_count = len(list(pass_dir.rglob("*.gpg")))
     console.print(
         Panel(
             f"[bold green]Vault exported successfully.[/bold green]\n\n"
@@ -1864,17 +2093,17 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
     """Restore the password store from an AES-256-GCM encrypted vault file."""
     inp = Path(input_path).expanduser().resolve()
     if not inp.exists():
-        console.print(f"[red]Vault file not found: {inp}[/red]")
+        _error(f"Vault file not found: {inp}")
         return
 
     # Read and validate magic header
     with open(inp, "rb") as f:
         magic = f.read(4)
         if magic != VAULT_MAGIC:
-            console.print(
-                "[red]Not a valid Passclip vault file.[/red]\n"
-                f"[dim]Expected magic header '{VAULT_MAGIC.decode()}'. Vaults exported "
-                "before v1.2 (PCV1) must be re-exported with the current version.[/dim]"
+            _error(
+                "Not a valid Passclip vault file.",
+                f"Expected magic header '{VAULT_MAGIC.decode()}'. Vaults exported "
+                "before v1.2 (PCV1) must be re-exported with the current version.",
             )
             return
         salt = f.read(32)
@@ -1882,7 +2111,7 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
         ciphertext = f.read()
 
     if len(salt) != 32 or len(nonce) != 12 or not ciphertext:
-        console.print("[red]Vault file is corrupted or truncated.[/red]")
+        _error("Vault file is corrupted or truncated.")
         return
 
     # Prompt for passphrase with rate limiting (3 attempts, exponential backoff)
@@ -1891,7 +2120,7 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
     for attempt in range(1, max_attempts + 1):
         passphrase = Prompt.ask("Vault passphrase", password=True)
         if not passphrase:
-            console.print("[red]Passphrase cannot be empty.[/red]")
+            _error("Passphrase cannot be empty.")
             return
         try:
             key = _derive_vault_key(passphrase.encode(), salt)
@@ -1904,7 +2133,7 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
             # and delays only ever punished the legitimate owner's typos.
             remaining = max_attempts - attempt
             if remaining > 0:
-                console.print(
+                err_console.print(
                     f"[red]Wrong passphrase.[/red] "
                     f"{remaining} attempt{'s' if remaining > 1 else ''} remaining."
                 )
@@ -2009,8 +2238,10 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
                 tar.extractall(extract_root, members=safe_members, filter="data")
             except TypeError:
                 tar.extractall(extract_root, members=safe_members)
+            # Count what this import restored, not the whole store — entries
+            # that were already there were not "restored" by it
+            restored = sum(1 for m in safe_members if m.isfile() and m.name.endswith(".gpg"))
 
-    restored = len(list(pass_dir.rglob("*.gpg")))
     console.print(
         Panel(
             f"[bold green]Vault imported successfully.[/bold green]\n\n"
@@ -2028,6 +2259,71 @@ def cmd_import_vault(input_path: str, force: bool = False) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _select_gpg_key(keys: list[tuple[str, str]]) -> str | None:
+    """Show a numbered GPG key table and return the chosen key id (None = cancel).
+
+    One implementation for the wizard and `init` — the wizard's own copy of
+    this prompt was unbounded, so an out-of-range number crashed it and 0
+    ("cancel" everywhere else in the UI) silently picked the first key.
+    """
+    t = Table(box=box.SIMPLE, show_header=False)
+    t.add_column("#", width=3)
+    t.add_column("Key ID", style="cyan")
+    t.add_column("User")
+    for i, (kid, uid) in enumerate(keys, 1):
+        t.add_row(str(i), kid, uid)
+    console.print(t)
+    choice = IntPrompt.ask("Select key number (0 to cancel)", default=1)
+    if 1 <= choice <= len(keys):
+        return keys[choice - 1][0]
+    return None
+
+
+def cmd_gpg_list() -> None:
+    """List all GPG public keys."""
+    keys = get_gpg_keys()
+    if not keys:
+        _error("No GPG keys found.", "Run [bold]gpg_gen[/bold] to create one.")
+        return
+    t = Table(title="GPG Keys", box=box.SIMPLE)
+    t.add_column("#", width=3)
+    t.add_column("Key ID", style="cyan")
+    t.add_column("User", style="magenta")
+    for i, (kid, uid) in enumerate(keys, 1):
+        t.add_row(str(i), kid, uid)
+    console.print(t)
+
+
+def cmd_gpg_gen() -> None:
+    """Generate a new GPG key (interactive)."""
+    console.print("[yellow]Tip: RSA 4096, no expiry is recommended.[/yellow]")
+    run_command(["gpg", "--full-generate-key"], interactive=True)
+
+
+def cmd_init(key_id: str | None = None) -> None:
+    """Initialize or re-initialize the password store against a GPG key.
+
+    `key_id` makes this scriptable; without it the key is picked interactively.
+    """
+    keys = get_gpg_keys()
+    if not keys:
+        _error("No GPG keys found.", "Run [bold]gpg_gen[/bold] first.")
+        return
+    if key_id is None:
+        key_id = _select_gpg_key(keys)
+        if key_id is None:
+            console.print("[dim]Cancelled.[/dim]")
+            return
+    elif key_id.startswith("-"):
+        _error("Key ID cannot start with '-'.")
+        return
+    _, err, rc = run_command(["pass", "init", key_id])
+    if rc == 0:
+        console.print(f"[green]Initialized with key {escape(key_id)}.[/green]")
+    else:
+        _error(escape(err))
+
+
 def cmd_wizard() -> None:
     """Guided first-time setup: GPG key + pass init + optional git."""
     console.print(
@@ -2042,7 +2338,7 @@ def cmd_wizard() -> None:
     console.print("\n[bold]Step 1[/bold] — Checking dependencies")
     missing = [t for t in ("pass", "gpg") if not shutil.which(t)]
     if missing:
-        console.print(f"[red]Missing:[/red] {', '.join(missing)}")
+        _error(f"Missing: {', '.join(missing)}")
         console.print("  macOS:  [cyan]brew install gnupg pass[/cyan]")
         console.print("  Ubuntu: [cyan]sudo apt install gnupg2 pass[/cyan]")
         console.print("  Arch:   [cyan]sudo pacman -S gnupg pass[/cyan]")
@@ -2065,22 +2361,17 @@ def cmd_wizard() -> None:
         run_command(["gpg", "--full-generate-key"], interactive=True)
         keys = get_gpg_keys()
         if not keys:
-            console.print("[red]No key found after generation. Aborting.[/red]")
+            _error("No key found after generation. Aborting.")
             return
 
     if len(keys) == 1:
         key_id = keys[0][0]
         console.print(f"[green]Using key: {key_id}[/green]")
     else:
-        t = Table(box=box.SIMPLE, show_header=False)
-        t.add_column("#", width=3)
-        t.add_column("Key ID", style="cyan")
-        t.add_column("User")
-        for i, (kid, uid) in enumerate(keys, 1):
-            t.add_row(str(i), kid, uid)
-        console.print(t)
-        choice = IntPrompt.ask("Select key number", default=1)
-        key_id = keys[max(0, choice - 1)][0]
+        key_id = _select_gpg_key(keys)
+        if key_id is None:
+            console.print("[dim]Cancelled.[/dim]")
+            return
 
     # Step 3: Init pass
     console.print(f"\n[bold]Step 3[/bold] — Initializing pass with key [cyan]{key_id}[/cyan]")
@@ -2145,14 +2436,20 @@ def cmd_config_show() -> None:
 def cmd_config_set(key: str, value: str) -> None:
     """Set a config key to a new value, with type coercion and validation."""
     if key not in DEFAULT_CONFIG:
-        console.print(f"[red]Unknown key:[/red] {escape(key)}")
-        console.print(f"Valid keys: {', '.join(DEFAULT_CONFIG)}")
+        _error(f"Unknown key: {escape(key)}", f"Valid keys: {', '.join(DEFAULT_CONFIG)}")
         return
     original_type = type(DEFAULT_CONFIG[key])
     try:
         typed_value = int(value) if original_type is int else value
     except ValueError:
-        console.print(f"[red]Expected {original_type.__name__} for '{escape(key)}'.[/red]")
+        _error(f"Expected {original_type.__name__} for '{escape(key)}'.")
+        return
+    # Same bounds load_config enforces — otherwise `config set` could persist a
+    # value that load_config silently discards on the next run (and a negative
+    # clip_timeout kills the clipboard clearer outright)
+    bounds_err = _config_value_error(key, typed_value)
+    if bounds_err:
+        _error(escape(bounds_err))
         return
     # Validate pass_dir exists
     if key == "pass_dir":
@@ -2362,15 +2659,25 @@ class PassShell(cmd.Cmd):
         """generate [entry] [length] [--no-symbols] [--clip]  Generate a password."""
         parts = _split_args(arg)
         entry, length, no_symbols, clip = None, None, False, False
+        usage = escape("Usage: generate [entry] [length] [--no-symbols|-n] [--clip|-c]")
         for p in parts:
-            if p == "--no-symbols":
+            # Both spellings: the CLI accepts -n/-c, and silently dropping them
+            # here printed the generated password to the terminal instead of
+            # copying it
+            if p in ("--no-symbols", "-n"):
                 no_symbols = True
-            elif p == "--clip":
+            elif p in ("--clip", "-c"):
                 clip = True
+            elif p.startswith("-"):
+                _error(f"Unknown flag: {escape(p)}", usage)
+                return
             elif p.isdigit() and length is None:
                 length = int(p)
             elif entry is None:
                 entry = p
+            else:
+                _error(f"Unexpected argument: {escape(p)}", usage)
+                return
         cmd_generate(entry, length, no_symbols, clip)
 
     complete_generate = _complete_entries
@@ -2382,8 +2689,11 @@ class PassShell(cmd.Cmd):
     complete_edit = _complete_entries
 
     def do_delete(self, arg: str) -> None:
-        """delete [entry]  Delete a password entry."""
-        cmd_delete(arg.strip() or None)
+        """delete [entry] [--force|-f]  Delete a password entry."""
+        parts = _split_args(arg)
+        force = bool({"--force", "-f"} & set(parts))
+        names = [p for p in parts if not p.startswith("-")]
+        cmd_delete(names[0] if names else None, force=force)
 
     complete_delete = _complete_entries
 
@@ -2421,24 +2731,31 @@ class PassShell(cmd.Cmd):
             # matching how the CLI's argv path behaves
             cmd_run(entry_part.strip(), _split_args(cmd_part))
         else:
-            console.print("[red]Usage:[/red] run <entry> -- <command>")
-            console.print("[dim]Example: run aws/prod -- aws s3 ls[/dim]")
+            _error("Usage: run <entry> -- <command>", "Example: run aws/prod -- aws s3 ls")
 
     def do_health(self, arg: str) -> None:
         """health  Scan all passwords for strength and duplicates."""
         cmd_health()
 
     def do_import(self, arg: str) -> None:
-        """import <file> [format] [--dry-run]  Import from Bitwarden/LastPass/1Password CSV."""
+        """import <file> [format] [--dry-run] [--force]  Import from Bitwarden/LastPass CSV."""
         parts = _split_args(arg)
+        dry_run = "--dry-run" in parts
+        force = "--force" in parts
+        parts = [p for p in parts if not p.startswith("-")]
         if not parts:
-            console.print(
-                "[red]Usage:[/red] import <file> [bitwarden|lastpass|1password|auto] [--dry-run]"
+            _error(
+                escape(
+                    "Usage: import <file> [bitwarden|lastpass|1password|auto] [--dry-run] [--force]"
+                )
             )
             return
-        dry_run = "--dry-run" in parts
-        parts = [p for p in parts if p != "--dry-run"]
-        cmd_import(parts[0], parts[1] if len(parts) > 1 else "auto", dry_run=dry_run)
+        cmd_import(
+            parts[0],
+            parts[1] if len(parts) > 1 else "auto",
+            dry_run=dry_run,
+            force=force,
+        )
 
     def do_sync(self, arg: str) -> None:
         """sync  Git pull + push the password store."""
@@ -2485,44 +2802,15 @@ class PassShell(cmd.Cmd):
 
     def do_gpg_list(self, arg: str) -> None:
         """gpg_list  List all GPG keys."""
-        keys = get_gpg_keys()
-        if not keys:
-            console.print("[red]No GPG keys found.[/red]")
-            return
-        t = Table(title="GPG Keys", box=box.SIMPLE)
-        t.add_column("#", width=3)
-        t.add_column("Key ID", style="cyan")
-        t.add_column("User", style="magenta")
-        for i, (kid, uid) in enumerate(keys, 1):
-            t.add_row(str(i), kid, uid)
-        console.print(t)
+        cmd_gpg_list()
 
     def do_gpg_gen(self, arg: str) -> None:
         """gpg_gen  Generate a new GPG key (interactive)."""
-        console.print("[yellow]Tip: RSA 4096, no expiry is recommended.[/yellow]")
-        run_command(["gpg", "--full-generate-key"], interactive=True)
+        cmd_gpg_gen()
 
     def do_init(self, arg: str) -> None:
-        """init  Initialize or re-initialize the password store."""
-        keys = get_gpg_keys()
-        if not keys:
-            console.print("[red]No GPG keys found. Run 'gpg_gen' first.[/red]")
-            return
-        t = Table(box=box.SIMPLE, show_header=False)
-        t.add_column("#", width=3)
-        t.add_column("Key ID", style="cyan")
-        t.add_column("User")
-        for i, (kid, uid) in enumerate(keys, 1):
-            t.add_row(str(i), kid, uid)
-        console.print(t)
-        choice = IntPrompt.ask("Select key number", default=1)
-        if 1 <= choice <= len(keys):
-            key_id = keys[choice - 1][0]
-            _, err, rc = run_command(["pass", "init", key_id])
-            if rc == 0:
-                console.print(f"[green]Initialized with key {key_id}.[/green]")
-            else:
-                _error(escape(err))
+        """init [key-id]  Initialize or re-initialize the password store."""
+        cmd_init(arg.strip() or None)
 
     def do_wizard(self, arg: str) -> None:
         """wizard  Run the first-time setup wizard."""
@@ -2593,25 +2881,30 @@ class PassShell(cmd.Cmd):
             t.add_column("Command", style="cyan", min_width=34)
             t.add_column("Description")
             for name, desc in commands:
-                t.add_row(name, desc)
+                # escape: placeholders like [entry] and [--clip] are rich markup and
+                # would otherwise be parsed as style tags and rendered as nothing
+                t.add_row(escape(name), desc)
             console.print(t)
 
     def do_export_vault(self, arg: str) -> None:
         """export_vault <file>  Export password store to an AES-encrypted vault file."""
-        parts = _split_args(arg)
-        if not parts:
-            console.print("[yellow]Usage: export_vault <output_file>[/yellow]")
+        # Filter flags out before taking the path, or 'export_vault --force f'
+        # would try to write a vault named '--force'
+        paths = [p for p in _split_args(arg) if not p.startswith("-")]
+        if not paths:
+            _error("Usage: export_vault <output_file>")
             return
-        cmd_export_vault(parts[0])
+        cmd_export_vault(paths[0])
 
     def do_import_vault(self, arg: str) -> None:
         """import_vault <file> [--force]  Restore password store from a vault file."""
         parts = _split_args(arg)
-        if not parts:
-            console.print("[yellow]Usage: import_vault <vault_file> [--force][/yellow]")
+        paths = [p for p in parts if not p.startswith("-")]
+        if not paths:
+            _error(escape("Usage: import_vault <vault_file> [--force]"))
             return
         force = "--force" in parts or "-f" in parts
-        cmd_import_vault(parts[0], force=force)
+        cmd_import_vault(paths[0], force=force)
 
     def do_quit(self, arg: str) -> bool:
         """quit  Exit Passclip."""
@@ -2639,10 +2932,15 @@ class PassShell(cmd.Cmd):
         )
 
     def onecmd(self, line: str) -> bool:
-        """Run one command; Ctrl-C cancels it and returns to the prompt."""
+        """Run one command; Ctrl-C or Ctrl-D cancels it and returns to the prompt."""
         try:
             return super().onecmd(line)
         except KeyboardInterrupt:
+            console.print("\n[yellow]Cancelled.[/yellow]")
+            return False
+        except EOFError:
+            # Ctrl-D at a nested Prompt.ask — backing out of a prompt must not
+            # unwind through cmdloop and end the session with a traceback
             console.print("\n[yellow]Cancelled.[/yellow]")
             return False
 
@@ -2751,6 +3049,11 @@ def build_parser() -> tuple[argparse.ArgumentParser, set]:
     sp.add_argument(
         "--dry-run", action="store_true", help="Preview what would be imported without writing"
     )
+    sp.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing store entries without confirming",
+    )
 
     # find
     sp = sub.add_parser("find", help="Find entries by name")
@@ -2780,6 +3083,15 @@ def build_parser() -> tuple[argparse.ArgumentParser, set]:
 
     # wizard
     sub.add_parser("wizard", help="First-time setup wizard")
+
+    # init / gpg_list / gpg_gen — same names as the interactive shell, so the
+    # documented recovery procedure ('passclip gpg_list', 'passclip init')
+    # works from a script instead of falling into the fuzzy-search fast path
+    sp = sub.add_parser("init", help="Initialize/re-initialize the password store")
+    sp.add_argument("key_id", nargs="?", help="GPG key ID (prompts if omitted)")
+
+    sub.add_parser("gpg_list", help="List available GPG keys")
+    sub.add_parser("gpg_gen", help="Generate a new GPG key (interactive)")
 
     # config
     sp = sub.add_parser("config", help="View or set config")
@@ -2813,6 +3125,7 @@ def build_parser() -> tuple[argparse.ArgumentParser, set]:
 
 
 def _start_shell() -> None:
+    global _ERROR_SEEN
     shell = PassShell()
     try:
         shell.cmdloop()
@@ -2821,10 +3134,14 @@ def _start_shell() -> None:
         console.print("\n[dim]Goodbye.[/dim]")
     finally:
         shell._release_lock()  # idempotent; covers every exit path
+        # A failed command mid-session is not a failed session
+        _ERROR_SEEN = False
 
 
 def main() -> None:
     """Entry point: load user config, then dispatch with graceful Ctrl-C."""
+    global _ERROR_SEEN
+    _ERROR_SEEN = False  # the flag is per-invocation, not per-process
     # update() mutates the module-level dict in place, so every reference
     # (including test patches) stays valid
     CONFIG.update(load_config())
@@ -2833,6 +3150,10 @@ def main() -> None:
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
         sys.exit(130)
+    # Every command reports failure through _error(); without this, a missing
+    # entry or a failed sync exits 0 and `set -e` scripts sail past it
+    if _ERROR_SEEN:
+        sys.exit(1)
 
 
 def _main() -> None:
@@ -2900,7 +3221,12 @@ def _main() -> None:
         cmd_git_log(args.n)
 
     elif args.command == "import":
-        cmd_import(args.file, args.format, dry_run=getattr(args, "dry_run", False))
+        cmd_import(
+            args.file,
+            args.format,
+            dry_run=getattr(args, "dry_run", False),
+            force=getattr(args, "force", False),
+        )
 
     elif args.command == "find":
         cmd_find(args.term)
@@ -2922,6 +3248,15 @@ def _main() -> None:
 
     elif args.command == "wizard":
         cmd_wizard()
+
+    elif args.command == "init":
+        cmd_init(args.key_id)
+
+    elif args.command == "gpg_list":
+        cmd_gpg_list()
+
+    elif args.command == "gpg_gen":
+        cmd_gpg_gen()
 
     elif args.command == "config":
         cmd_config(args.key, args.value)

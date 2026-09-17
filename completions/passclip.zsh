@@ -64,7 +64,7 @@ _passclip() {
             _files
             ;;
         config)
-            compadd clip_timeout default_password_length default_mode pass_dir
+            compadd clip_timeout default_password_length pass_dir
             ;;
         restore)
             compadd $(_passclip_entries | grep '^archive/' | sed 's|^archive/||')
