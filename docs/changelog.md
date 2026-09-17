@@ -65,8 +65,10 @@ Every finding from the September 2026 code review. The bulk of it is stopping ro
 ### Dependencies and tooling
 
 - `credactor` 2.5.0 → 2.7.2, with the pre-commit hook rev moved to the matching commit SHA. The scanner reports no findings against the tree at the default entropy floor.
-- The `dev` extra's `ruff>=0.15` allowed a contributor to pass `make lint` locally on 0.15.x and then fail CI on rules added in 0.16; it now matches the CI floor. Formatting was checked against the pinned 0.16.4 as well as current, with no drift.
-- The hashed lockfile was regenerated in one resolution. Only `credactor` and `pip` moved; both sets of hashes were verified against PyPI, the lockfile installs under `--require-hashes`, and `pip-audit` reports no known vulnerabilities.
+- The `dev` extra's `ruff>=0.15` allowed a contributor to pass `make lint` locally on 0.15.x and then fail CI on rules added in 0.16; it now matches the CI floor.
+- `ruff` 0.16.4 → 0.16.8, `cryptography` 50.0.0 → 50.0.1, `build` 1.5.0 → 1.6.1, with the ruff pre-commit hook rev moved to the matching commit SHA. `build` 1.6.1 is the first release past the yanked 1.5.1 that 1.4.0 had to skip. Neither `ruff` release adds a rule or a formatting change that affects this tree — `ruff check` and `ruff format --check` are clean under the newly pinned version.
+- `github/codeql-action/upload-sarif` 4.37.7 → 4.38.0, pinned to the dereferenced commit rather than the annotated tag object, as the other action pins are.
+- The hashed lockfile was regenerated in one resolution rather than merging the four Dependabot bumps one at a time, which breaks the `--require-hashes` install by rewriting one package's hashes against a stale transitive set. Twenty pins moved, direct and transitive; the three headline packages' hashes were verified against PyPI, the lockfile installs under `--require-hashes`, and `pip-audit` reports no known vulnerabilities.
 - The Credactor pin in the README and `docs/integration.md` pre-commit snippets was three and five versions stale respectively; both now match the repo's own config.
 
 ### Tests
