@@ -52,6 +52,17 @@ scripts.
 - `tests/test_review_findings.py` adds a regression test per finding. The CLI/shell parity test accepted a parameter it never asserted on, so it only checked that *something* was called — which is how the `generate` flag drift got in; it now compares the arguments, and caught a missing shell `delete --force` immediately.
 - Closes the coverage gaps the review named: `_main`'s exit codes, `cmd_health`, `cmd_git_log`, `_move_or_copy`'s leading-dash guard, the wizard's key selection, and the export side of the symlink containment check.
 
+### Security
+
+- **`pip` 26.1.2 → 26.2.1** — GHSA-qwm4-qh6w-59xr (moderate), affecting everything below 26.2.0. `pip` is not a Passclip dependency; it reaches the lockfile only as a `pip-api` requirement, itself pulled in by `pip-audit`, so nothing in the shipped package or at runtime was exposed. It is now listed directly in `requirements-ci.in` with a `>=26.2` floor so the resolver cannot drop back into the affected range on a future regeneration.
+
+### Dependencies and tooling
+
+- `credactor` 2.5.0 → 2.7.2, with the pre-commit hook rev moved to the matching commit SHA. The scanner reports no findings against the tree at the default entropy floor.
+- The `dev` extra's `ruff>=0.15` allowed a contributor to pass `make lint` locally on 0.15.x and then fail CI on rules added in 0.16; it now matches the CI floor. Formatting was checked against the pinned 0.16.4 as well as current, with no drift.
+- The hashed lockfile was regenerated in one resolution. Only `credactor` and `pip` moved; both sets of hashes were verified against PyPI, the lockfile installs under `--require-hashes`, and `pip-audit` reports no known vulnerabilities.
+- The Credactor pin in the README and `docs/integration.md` pre-commit snippets was three and five versions stale respectively; both now match the repo's own config.
+
 ---
 
 ## [1.4.0] — 2026-08-20
