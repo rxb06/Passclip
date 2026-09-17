@@ -6,12 +6,23 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ---
 
-## [Unreleased]
+## [1.5.0] — 2026-09-17
 
-Fixes for the September 2026 code review. No new features beyond the three
-commands the documentation already promised; the bulk of this is stopping
-routine operations from destroying secrets and making failures visible to
-scripts.
+Every finding from the September 2026 code review. The bulk of it is stopping routine operations from destroying secrets, and making failures visible to scripts instead of reporting success. **Read "Changed" before upgrading if you drive Passclip from a script** — error output, exit status and two behaviours have moved.
+
+### Added
+
+- **`init`, `gpg_list` and `gpg_gen` are now CLI subcommands**, not shell-only. `init` takes an optional key ID (`passclip init ABC123`), so first-time setup and re-keying can be scripted rather than requiring the interactive wizard.
+- **`import --force`** overwrites entries already in the store without prompting, for unattended migrations.
+- **`delete --force`** in the interactive shell, matching the CLI flag it already had.
+
+### Changed
+
+- **Errors now go to stderr, and a failed command exits non-zero.** Previously every subcommand except `run` exited 0 whatever happened, and `_error()` wrote to stdout. Scripts that inspect `$?` or capture stdout will see different — correct — behaviour; a pipeline that silently treated failures as success will now fail where it should have all along.
+- **The configured `pass_dir` is now passed to `pass` itself.** If you set a non-default `pass_dir`, Passclip was reading it for listings while `get`, `insert` and `rm` operated on `~/.password-store`. Those writes now land in the configured store, which is the documented intent — but it does mean entries created through Passclip before this release may sit in a different store than the one it now uses. Check both before assuming anything is missing.
+- **Entry field keys must now look like a single identifier.** A line whose key contains whitespace (`recovery code: 1234`) is kept as a note rather than parsed as a field, so notes containing `": "` stop being silently promoted and reordered above the notes block. The trade is that multi-word keys no longer appear as `PASS_*` environment variables under `run`; single-token keys (`recovery-code:`, `api-key:`) are unaffected.
+- **`delete` on a name that is both an entry and a folder removes only the entry.** `pass rm -r` previously took the folder's contents with it. The remaining entries are named in the output so nothing disappears quietly.
+- **`generate` on an existing entry replaces the password in place** rather than rewriting the file. See "Fixed — data loss".
 
 ### Fixed — data loss
 
@@ -24,9 +35,8 @@ scripts.
 
 ### Fixed — scripting
 
-- **`get --field` wrote its errors to stdout and exited 0**, so `DB_PASS=$(passclip get db/prod --field password)` captured `Error: Cannot decrypt 'db/prod'…` as the password and no `||` check fired. Errors now go to stderr, and any command that reaches an error exits non-zero — previously only `run` propagated a status, so failed imports, deletes and syncs all reported success.
+- **`get --field` wrote its errors to stdout and exited 0**, so `DB_PASS=$(passclip get db/prod --field password)` captured `Error: Cannot decrypt 'db/prod'…` as the password and no `||` check fired.
 - **The configured `pass_dir` never reached `pass`.** It was used for passclip's own filesystem reads but no child process ever received `PASSWORD_STORE_DIR`, so with a non-default store `ls` and `health` read one store while `get`, `insert` and `rm` used another: `insert` wrote to `~/.password-store` while `export-vault` archived the configured one.
-- **`init`, `gpg_list` and `gpg_gen` existed only in the interactive shell**, though `docs/setup.md` gives `passclip gpg_list` / `passclip init` as the recovery procedure for a store encrypted to a missing key. Following it printed "No entries matching 'init'". All three are now real subcommands, and `init` takes an optional key ID so setup can be scripted.
 
 ### Fixed — correctness
 
@@ -41,16 +51,11 @@ scripts.
 - **An `otpauth://` URI pasted into an entry by hand yielded the whole notes block**, URI and following lines together, which no TOTP parser accepts. Extraction now matches per line.
 - **One undecodable entry aborted whole-store scans.** `UnicodeDecodeError` is a `ValueError`, so it escaped `run_command`'s handlers and killed the entire `health` report — bypassing its own per-entry error handling — on a single latin-1 password.
 - **`export-vault` failed only after encrypting everything** if the output directory did not exist: the passphrase was taken twice and the whole store tarred and encrypted before `mkstemp` raised. The destination is now checked first.
-- **Notes containing `": "` were reclassified as fields** and re-emitted above the notes block. A field key must now look like a single identifier, so `Backup codes: ask ops` stays a note. Note that entries relying on multi-word keys no longer expose them as `PASS_*` variables under `run`.
+- **Notes containing `": "` were reclassified as fields** and re-emitted above the notes block. A field key must now look like a single identifier, so `Backup codes: ask ops` stays a note.
 - **The shell's `generate` silently discarded `-c` and `-n`**, printing the password to the terminal instead of copying it. Both spellings are accepted and unknown flags are refused. The shell also gained `delete --force`, matching the CLI.
 - **Ctrl-D at a nested prompt killed the shell with a traceback** rather than cancelling the command.
 - **Bracketed placeholders vanished from `help` and usage text** — `[entry]`, `[--clip]` and the like were parsed as rich style tags and rendered as nothing.
 - Smaller items: the vault entry counts now reflect what was actually archived and restored rather than counting skipped symlinks and pre-existing entries; `gitlog -5` no longer builds the flag `--5`; CSV names containing shell metacharacters are folded rather than dropping the row; the duplicate list in `health` says how many groups it truncated; `import` handles an unreadable path instead of raising; the shell's vault commands no longer treat a leading flag as the filename.
-
-### Tests
-
-- `tests/test_review_findings.py` adds a regression test per finding. The CLI/shell parity test accepted a parameter it never asserted on, so it only checked that *something* was called — which is how the `generate` flag drift got in; it now compares the arguments, and caught a missing shell `delete --force` immediately.
-- Closes the coverage gaps the review named: `_main`'s exit codes, `cmd_health`, `cmd_git_log`, `_move_or_copy`'s leading-dash guard, the wizard's key selection, and the export side of the symlink containment check.
 
 ### Security
 
@@ -62,6 +67,12 @@ scripts.
 - The `dev` extra's `ruff>=0.15` allowed a contributor to pass `make lint` locally on 0.15.x and then fail CI on rules added in 0.16; it now matches the CI floor. Formatting was checked against the pinned 0.16.4 as well as current, with no drift.
 - The hashed lockfile was regenerated in one resolution. Only `credactor` and `pip` moved; both sets of hashes were verified against PyPI, the lockfile installs under `--require-hashes`, and `pip-audit` reports no known vulnerabilities.
 - The Credactor pin in the README and `docs/integration.md` pre-commit snippets was three and five versions stale respectively; both now match the repo's own config.
+
+### Tests
+
+- `tests/test_review_findings.py` adds a regression test per finding. The CLI/shell parity test accepted a parameter it never asserted on, so it only checked that *something* was called — which is how the `generate` flag drift got in; it now compares the arguments, and caught a missing shell `delete --force` immediately.
+- Closes the coverage gaps the review named: `_main`'s exit codes, `cmd_health`, `cmd_git_log`, `_move_or_copy`'s leading-dash guard, the wizard's key selection, and the export side of the symlink containment check.
+- 247 tests total, up from 185.
 
 ---
 
