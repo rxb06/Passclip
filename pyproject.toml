@@ -49,7 +49,7 @@ dependencies = [
 clipboard = ["pyperclip>=1.11"]
 otp = ["pyotp>=2.9"]
 all = ["pyperclip>=1.11", "pyotp>=2.9"]
-dev = ["pytest>=9.0", "ruff>=0.15"]
+dev = ["pytest>=9.0", "ruff>=0.16"]  # keep >= the ruff pin CI uses
 
 [project.scripts]
 passclip = "passclip:main"

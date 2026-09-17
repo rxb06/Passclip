@@ -22,6 +22,7 @@ from passclip import (
     password_strength,
     save_config,
     strength_bar,
+    validate_entry_name,
 )
 
 # ---------------------------------------------------------------------------
@@ -388,16 +389,18 @@ class TestSanitizeEntryPath:
         result = _sanitize_entry_path("name", "../../../etc")
         assert result is None or ".." not in result
 
-    def test_shell_metacharacters_rejected(self):
-        """Names with shell metacharacters should be rejected after sanitization."""
-        # _sanitize_entry_path replaces / and .. but metacharacters
-        # are caught by validate_entry_name() which it calls internally
+    def test_shell_metacharacters_folded(self):
+        """Metacharacters are folded away, not grounds for dropping the row."""
         result = _sanitize_entry_path("test$(evil)", "")
-        assert result is None
+        assert result is not None
+        assert not any(c in result for c in "`$(){}|;&<>!\\")
+        assert validate_entry_name(result)[0]
 
-    def test_null_byte_rejected(self):
+    def test_null_byte_folded(self):
         result = _sanitize_entry_path("test\x00evil", "")
-        assert result is None
+        assert result is not None
+        assert "\x00" not in result
+        assert validate_entry_name(result)[0]
 
     def test_very_long_name(self):
         """Extremely long names should be rejected by validate_entry_name."""

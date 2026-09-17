@@ -103,7 +103,7 @@ class TestMaliciousVault:
         store = tmp_path / "deep" / "store"
         store.parent.mkdir()
         _import(store, vault)
-        assert "aborted" in capsys.readouterr().out.lower()
+        assert "aborted" in capsys.readouterr().err.lower()
         assert not (tmp_path / "evil.txt").exists()
 
     def test_fifo_member_aborts(self, tmp_path, capsys):
@@ -113,7 +113,7 @@ class TestMaliciousVault:
         store = tmp_path / "b" / ".password-store"
         store.parent.mkdir()
         _import(store, vault)
-        assert "aborted" in capsys.readouterr().out.lower()
+        assert "aborted" in capsys.readouterr().err.lower()
         assert not (store / "fifo.gpg").exists()
 
     def test_setuid_and_world_writable_modes_clamped(self, tmp_path):
@@ -146,7 +146,7 @@ class TestVaultPassphraseQuality:
         ):
             cmd_export_vault(str(out_file))
         assert not out_file.exists()
-        assert "12" in capsys.readouterr().out
+        assert "12" in capsys.readouterr().err
 
 
 class TestMarkupEscaping:
@@ -163,7 +163,9 @@ class TestMarkupEscaping:
         ):
             cmd_import(str(csv_file), "generic")
         out = capsys.readouterr().out
-        assert "[red]bad$(x)[/red]" in out, (
+        # The name is folded into a legal entry path, but the markup in it must
+        # still render literally rather than being parsed as style tags
+        assert "[red]bad--x-[-red]" in out, (
             "untrusted CSV name must be shown literally, not parsed as markup"
         )
 

@@ -6,6 +6,54 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ---
 
+## [Unreleased]
+
+Fixes for the September 2026 code review. No new features beyond the three
+commands the documentation already promised; the bulk of this is stopping
+routine operations from destroying secrets and making failures visible to
+scripts.
+
+### Fixed — data loss
+
+- **`generate <existing-entry>` destroyed everything but the password.** `pass generate -f` rewrites the file to the new password alone, so rotating a password also deleted the username, URL, notes and any stored TOTP seed — while printing a success message. This is the action `health` recommends, so the loss was invited. Rotation now uses `-i`, which replaces only the first line; `-f` is kept for genuinely new entries.
+- **`delete <folder>` erased every entry beneath it and "backed up" nothing.** The name was never checked against the store and `pass rm` was always called with `-r`, so a mistyped `delete web` removed `web/gmail`, `web/github` and `web/aws`. The `.bak` file it promised held the output of `pass show web` — a tree listing, not secrets. A folder now lists every entry at stake in the prompt and backs each one up individually; a single entry no longer passes `-r`, restoring `pass`'s own refusal to delete a directory.
+- **A failed pre-delete backup was ignored and the delete went ahead anyway** — precisely when the GPG agent is locked and the backup matters most. It now aborts without removing anything.
+- **CSV import silently collapsed rows onto each other.** Names are lowercased and folded during sanitization, so three Bitwarden logins called "Gmail", "gmail" and "GMAIL" all became `web/gmail`; each overwrote the last and all three were counted as imported. Colliding rows are now suffixed instead.
+- **CSV import overwrote live store entries without asking.** It detected the collision, printed `⚠ (overwriting)`, and overwrote regardless — with no `--force` to opt into it, while single-entry `insert` has always asked. Collisions are now collected and confirmed up front, or waved through with the new `--force`.
+- **`otp --add` deleted an unrelated `secret:` field.** `secret` was stripped as an OTP alias, so adding a TOTP seed to an entry holding `secret: sk_live_…` discarded the API key. It is now only removed when its value really parses as an OTP secret, and replaced fields are named before being replaced.
+
+### Fixed — scripting
+
+- **`get --field` wrote its errors to stdout and exited 0**, so `DB_PASS=$(passclip get db/prod --field password)` captured `Error: Cannot decrypt 'db/prod'…` as the password and no `||` check fired. Errors now go to stderr, and any command that reaches an error exits non-zero — previously only `run` propagated a status, so failed imports, deletes and syncs all reported success.
+- **The configured `pass_dir` never reached `pass`.** It was used for passclip's own filesystem reads but no child process ever received `PASSWORD_STORE_DIR`, so with a non-default store `ls` and `health` read one store while `get`, `insert` and `rm` used another: `insert` wrote to `~/.password-store` while `export-vault` archived the configured one.
+- **`init`, `gpg_list` and `gpg_gen` existed only in the interactive shell**, though `docs/setup.md` gives `passclip gpg_list` / `passclip init` as the recovery procedure for a store encrypted to a missing key. Following it printed "No entries matching 'init'". All three are now real subcommands, and `init` takes an optional key ID so setup can be scripted.
+
+### Fixed — correctness
+
+- **Valid TOTP seeds were rejected outright.** Validation used `base64.b32decode` without padding, so any seed whose length is not a multiple of 8 — a 26-character seed, for instance — was refused as "not valid base32" through every code path, despite working fine.
+- **The clipboard promised an auto-clear that sometimes never happened.** "Auto-clearing in 45s…" was printed before the clearer was spawned and regardless of whether it started. The message is now printed only on success, with a warning otherwise. Three separate causes are closed: a failed `Popen`, a locale/UTF-8 mismatch between the copy and the comparison, and a negative `clip_timeout`.
+- **`xclip`/`wl-copy` could hang the CLI indefinitely.** Both fork a background process that owns the selection and inherits the pipes, so `capture_output=True` waited for an EOF that never came — with the password on the clipboard and no clearer armed. Output now goes to `DEVNULL` with a timeout.
+- **`otp` raised a traceback instead of an error message.** pyotp is lazy, so `.now()` — the call that actually touches the secret — sat outside the `try` that was meant to guard it. HOTP URIs, which validation accepted, failed with `'HOTP' object has no attribute 'now'`; they are now rejected by name.
+- **`config set` skipped the bounds `load_config` enforces**, persisting values it then silently discarded. A negative `clip_timeout` also killed the clipboard clearer outright while the UI announced "Auto-clearing in -5s…". Both share one validation table now.
+- **The wizard's GPG key prompt was unbounded** — an out-of-range number crashed setup, and `0`, which cancels everywhere else in the UI, silently selected the first key and initialized the store against it. It now shares `init`'s guarded prompt.
+- **`insert` crashed on roughly 1 in 6,000 generated passwords** by printing them unescaped; any `[/…]` run in the password is parsed as a rich closing tag. The crash landed before the entry was saved, losing it.
+- **LastPass imports dropped every TOTP seed** — the branch hardcoded an empty OTP field although the export carries a `totp` column.
+- **An `otpauth://` URI pasted into an entry by hand yielded the whole notes block**, URI and following lines together, which no TOTP parser accepts. Extraction now matches per line.
+- **One undecodable entry aborted whole-store scans.** `UnicodeDecodeError` is a `ValueError`, so it escaped `run_command`'s handlers and killed the entire `health` report — bypassing its own per-entry error handling — on a single latin-1 password.
+- **`export-vault` failed only after encrypting everything** if the output directory did not exist: the passphrase was taken twice and the whole store tarred and encrypted before `mkstemp` raised. The destination is now checked first.
+- **Notes containing `": "` were reclassified as fields** and re-emitted above the notes block. A field key must now look like a single identifier, so `Backup codes: ask ops` stays a note. Note that entries relying on multi-word keys no longer expose them as `PASS_*` variables under `run`.
+- **The shell's `generate` silently discarded `-c` and `-n`**, printing the password to the terminal instead of copying it. Both spellings are accepted and unknown flags are refused. The shell also gained `delete --force`, matching the CLI.
+- **Ctrl-D at a nested prompt killed the shell with a traceback** rather than cancelling the command.
+- **Bracketed placeholders vanished from `help` and usage text** — `[entry]`, `[--clip]` and the like were parsed as rich style tags and rendered as nothing.
+- Smaller items: the vault entry counts now reflect what was actually archived and restored rather than counting skipped symlinks and pre-existing entries; `gitlog -5` no longer builds the flag `--5`; CSV names containing shell metacharacters are folded rather than dropping the row; the duplicate list in `health` says how many groups it truncated; `import` handles an unreadable path instead of raising; the shell's vault commands no longer treat a leading flag as the filename.
+
+### Tests
+
+- `tests/test_review_findings.py` adds a regression test per finding. The CLI/shell parity test accepted a parameter it never asserted on, so it only checked that *something* was called — which is how the `generate` flag drift got in; it now compares the arguments, and caught a missing shell `delete --force` immediately.
+- Closes the coverage gaps the review named: `_main`'s exit codes, `cmd_health`, `cmd_git_log`, `_move_or_copy`'s leading-dash guard, the wizard's key selection, and the export side of the symlink containment check.
+
+---
+
 ## [1.4.0] — 2026-08-20
 
 A dependency release. No functional changes to Passclip itself — `passclip.py` is byte-identical to 1.3.0 apart from the version string — but two advisories affecting pinned dependencies are closed, so upgrading is worthwhile for anyone installing from PyPI.

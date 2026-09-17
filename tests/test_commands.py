@@ -89,7 +89,7 @@ class TestImportVaultErrors:
         vault = tmp_path / "fake.vault"
         vault.write_bytes(b"FAKE" + b"\x00" * 60)
         cmd_import_vault(str(vault))
-        out = capsys.readouterr().out
+        out = capsys.readouterr().err
         assert "PCV2" in out
         # PCV1 may be mentioned only to say old vaults are unsupported,
         # never as the expected header.

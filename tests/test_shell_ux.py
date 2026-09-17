@@ -117,7 +117,7 @@ class TestSmartCopy:
         ):
             smart_copy(["-S", "gmail"])  # typo'd flag must not copy the password
         get.assert_not_called()
-        assert "unknown flag" in capsys.readouterr().out.lower()
+        assert "unknown flag" in capsys.readouterr().err.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ class TestCmdRun:
         assert cmd_run("e", []) != 0
 
     def test_env_names_sanitized(self):
-        content = "pw\nrecovery code: 1234\n"
+        content = "pw\nrecovery-code: 1234\n"
         with (
             patch("passclip.get_entry_raw", return_value=(content, None)),
             patch("passclip.subprocess.run", return_value=MagicMock(returncode=0)) as run,
@@ -182,7 +182,7 @@ class TestCmdRun:
             cmd_run("e", ["somecmd"])
         env = run.call_args.kwargs["env"]
         assert "PASS_RECOVERY_CODE" in env
-        assert "PASS_RECOVERY CODE" not in env
+        assert "PASS_RECOVERY-CODE" not in env
 
 
 # ---------------------------------------------------------------------------
