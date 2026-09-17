@@ -15,7 +15,7 @@ If you use the [pre-commit](https://pre-commit.com/) framework, add this to your
 ```yaml
 repos:
   - repo: https://github.com/rxb06/Credactor
-    rev: v2.2.2
+    rev: v2.7.2
     hooks:
       - id: credactor
 ```

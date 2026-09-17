@@ -6,6 +6,76 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ---
 
+## [1.5.0] — 2026-09-17
+
+Every finding from the September 2026 code review. The bulk of it is stopping routine operations from destroying secrets, and making failures visible to scripts instead of reporting success. **Read "Changed" before upgrading if you drive Passclip from a script** — error output, exit status and two behaviours have moved.
+
+### Added
+
+- **`init`, `gpg_list` and `gpg_gen` are now CLI subcommands**, not shell-only. `init` takes an optional key ID (`passclip init ABC123`), so first-time setup and re-keying can be scripted rather than requiring the interactive wizard.
+- **`import --force`** overwrites entries already in the store without prompting, for unattended migrations.
+- **`delete --force`** in the interactive shell, matching the CLI flag it already had.
+
+### Changed
+
+- **Errors now go to stderr, and a failed command exits non-zero.** Previously every subcommand except `run` exited 0 whatever happened, and `_error()` wrote to stdout. Scripts that inspect `$?` or capture stdout will see different — correct — behaviour; a pipeline that silently treated failures as success will now fail where it should have all along.
+- **The configured `pass_dir` is now passed to `pass` itself.** If you set a non-default `pass_dir`, Passclip was reading it for listings while `get`, `insert` and `rm` operated on `~/.password-store`. Those writes now land in the configured store, which is the documented intent — but it does mean entries created through Passclip before this release may sit in a different store than the one it now uses. Check both before assuming anything is missing.
+- **Entry field keys must now look like a single identifier.** A line whose key contains whitespace (`recovery code: 1234`) is kept as a note rather than parsed as a field, so notes containing `": "` stop being silently promoted and reordered above the notes block. The trade is that multi-word keys no longer appear as `PASS_*` environment variables under `run`; single-token keys (`recovery-code:`, `api-key:`) are unaffected.
+- **`delete` on a name that is both an entry and a folder removes only the entry.** `pass rm -r` previously took the folder's contents with it. The remaining entries are named in the output so nothing disappears quietly.
+- **`generate` on an existing entry replaces the password in place** rather than rewriting the file. See "Fixed — data loss".
+
+### Fixed — data loss
+
+- **`generate <existing-entry>` destroyed everything but the password.** `pass generate -f` rewrites the file to the new password alone, so rotating a password also deleted the username, URL, notes and any stored TOTP seed — while printing a success message. This is the action `health` recommends, so the loss was invited. Rotation now uses `-i`, which replaces only the first line; `-f` is kept for genuinely new entries.
+- **`delete <folder>` erased every entry beneath it and "backed up" nothing.** The name was never checked against the store and `pass rm` was always called with `-r`, so a mistyped `delete web` removed `web/gmail`, `web/github` and `web/aws`. The `.bak` file it promised held the output of `pass show web` — a tree listing, not secrets. A folder now lists every entry at stake in the prompt and backs each one up individually; a single entry no longer passes `-r`, restoring `pass`'s own refusal to delete a directory.
+- **A failed pre-delete backup was ignored and the delete went ahead anyway** — precisely when the GPG agent is locked and the backup matters most. It now aborts without removing anything.
+- **CSV import silently collapsed rows onto each other.** Names are lowercased and folded during sanitization, so three Bitwarden logins called "Gmail", "gmail" and "GMAIL" all became `web/gmail`; each overwrote the last and all three were counted as imported. Colliding rows are now suffixed instead.
+- **CSV import overwrote live store entries without asking.** It detected the collision, printed `⚠ (overwriting)`, and overwrote regardless — with no `--force` to opt into it, while single-entry `insert` has always asked. Collisions are now collected and confirmed up front, or waved through with the new `--force`.
+- **`otp --add` deleted an unrelated `secret:` field.** `secret` was stripped as an OTP alias, so adding a TOTP seed to an entry holding `secret: sk_live_…` discarded the API key. It is now only removed when its value really parses as an OTP secret, and replaced fields are named before being replaced.
+
+### Fixed — scripting
+
+- **`get --field` wrote its errors to stdout and exited 0**, so `DB_PASS=$(passclip get db/prod --field password)` captured `Error: Cannot decrypt 'db/prod'…` as the password and no `||` check fired.
+- **The configured `pass_dir` never reached `pass`.** It was used for passclip's own filesystem reads but no child process ever received `PASSWORD_STORE_DIR`, so with a non-default store `ls` and `health` read one store while `get`, `insert` and `rm` used another: `insert` wrote to `~/.password-store` while `export-vault` archived the configured one.
+
+### Fixed — correctness
+
+- **Valid TOTP seeds were rejected outright.** Validation used `base64.b32decode` without padding, so any seed whose length is not a multiple of 8 — a 26-character seed, for instance — was refused as "not valid base32" through every code path, despite working fine.
+- **The clipboard promised an auto-clear that sometimes never happened.** "Auto-clearing in 45s…" was printed before the clearer was spawned and regardless of whether it started. The message is now printed only on success, with a warning otherwise. Three separate causes are closed: a failed `Popen`, a locale/UTF-8 mismatch between the copy and the comparison, and a negative `clip_timeout`.
+- **`xclip`/`wl-copy` could hang the CLI indefinitely.** Both fork a background process that owns the selection and inherits the pipes, so `capture_output=True` waited for an EOF that never came — with the password on the clipboard and no clearer armed. Output now goes to `DEVNULL` with a timeout.
+- **`otp` raised a traceback instead of an error message.** pyotp is lazy, so `.now()` — the call that actually touches the secret — sat outside the `try` that was meant to guard it. HOTP URIs, which validation accepted, failed with `'HOTP' object has no attribute 'now'`; they are now rejected by name.
+- **`config set` skipped the bounds `load_config` enforces**, persisting values it then silently discarded. A negative `clip_timeout` also killed the clipboard clearer outright while the UI announced "Auto-clearing in -5s…". Both share one validation table now.
+- **The wizard's GPG key prompt was unbounded** — an out-of-range number crashed setup, and `0`, which cancels everywhere else in the UI, silently selected the first key and initialized the store against it. It now shares `init`'s guarded prompt.
+- **`insert` crashed on roughly 1 in 6,000 generated passwords** by printing them unescaped; any `[/…]` run in the password is parsed as a rich closing tag. The crash landed before the entry was saved, losing it.
+- **LastPass imports dropped every TOTP seed** — the branch hardcoded an empty OTP field although the export carries a `totp` column.
+- **An `otpauth://` URI pasted into an entry by hand yielded the whole notes block**, URI and following lines together, which no TOTP parser accepts. Extraction now matches per line.
+- **One undecodable entry aborted whole-store scans.** `UnicodeDecodeError` is a `ValueError`, so it escaped `run_command`'s handlers and killed the entire `health` report — bypassing its own per-entry error handling — on a single latin-1 password.
+- **`export-vault` failed only after encrypting everything** if the output directory did not exist: the passphrase was taken twice and the whole store tarred and encrypted before `mkstemp` raised. The destination is now checked first.
+- **Notes containing `": "` were reclassified as fields** and re-emitted above the notes block. A field key must now look like a single identifier, so `Backup codes: ask ops` stays a note.
+- **The shell's `generate` silently discarded `-c` and `-n`**, printing the password to the terminal instead of copying it. Both spellings are accepted and unknown flags are refused. The shell also gained `delete --force`, matching the CLI.
+- **Ctrl-D at a nested prompt killed the shell with a traceback** rather than cancelling the command.
+- **Bracketed placeholders vanished from `help` and usage text** — `[entry]`, `[--clip]` and the like were parsed as rich style tags and rendered as nothing.
+- Smaller items: the vault entry counts now reflect what was actually archived and restored rather than counting skipped symlinks and pre-existing entries; `gitlog -5` no longer builds the flag `--5`; CSV names containing shell metacharacters are folded rather than dropping the row; the duplicate list in `health` says how many groups it truncated; `import` handles an unreadable path instead of raising; the shell's vault commands no longer treat a leading flag as the filename.
+
+### Security
+
+- **`pip` 26.1.2 → 26.2.1** — GHSA-qwm4-qh6w-59xr (moderate), affecting everything below 26.2.0. `pip` is not a Passclip dependency; it reaches the lockfile only as a `pip-api` requirement, itself pulled in by `pip-audit`, so nothing in the shipped package or at runtime was exposed. It is now listed directly in `requirements-ci.in` with a `>=26.2` floor so the resolver cannot drop back into the affected range on a future regeneration.
+
+### Dependencies and tooling
+
+- `credactor` 2.5.0 → 2.7.2, with the pre-commit hook rev moved to the matching commit SHA. The scanner reports no findings against the tree at the default entropy floor.
+- The `dev` extra's `ruff>=0.15` allowed a contributor to pass `make lint` locally on 0.15.x and then fail CI on rules added in 0.16; it now matches the CI floor. Formatting was checked against the pinned 0.16.4 as well as current, with no drift.
+- The hashed lockfile was regenerated in one resolution. Only `credactor` and `pip` moved; both sets of hashes were verified against PyPI, the lockfile installs under `--require-hashes`, and `pip-audit` reports no known vulnerabilities.
+- The Credactor pin in the README and `docs/integration.md` pre-commit snippets was three and five versions stale respectively; both now match the repo's own config.
+
+### Tests
+
+- `tests/test_review_findings.py` adds a regression test per finding. The CLI/shell parity test accepted a parameter it never asserted on, so it only checked that *something* was called — which is how the `generate` flag drift got in; it now compares the arguments, and caught a missing shell `delete --force` immediately.
+- Closes the coverage gaps the review named: `_main`'s exit codes, `cmd_health`, `cmd_git_log`, `_move_or_copy`'s leading-dash guard, the wizard's key selection, and the export side of the symlink containment check.
+- 247 tests total, up from 185.
+
+---
+
 ## [1.4.0] — 2026-08-20
 
 A dependency release. No functional changes to Passclip itself — `passclip.py` is byte-identical to 1.3.0 apart from the version string — but two advisories affecting pinned dependencies are closed, so upgrading is worthwhile for anyone installing from PyPI.

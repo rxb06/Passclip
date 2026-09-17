@@ -61,7 +61,7 @@ The test suite covers config loading and validation, entry parsing and formattin
 
 ## Making changes
 
-1. Create a branch from `main`:
+1. Create a branch from `develop`:
    ```bash
    git checkout -b fix/clipboard-timeout
    ```
@@ -83,7 +83,7 @@ The test suite covers config loading and validation, entry parsing and formattin
    git commit -m "Fix clipboard not clearing when timeout is set to 0"
    ```
 
-5. Open a pull request against `main`. Describe what you changed and why.
+5. Open a pull request against `develop`. Describe what you changed and why.
 
 ---
 

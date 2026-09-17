@@ -61,7 +61,7 @@ class TestVaultImportContainment:
         ):
             cmd_import_vault(str(vault), force=True)
 
-        out = capsys.readouterr().out.lower()
+        out = capsys.readouterr().err.lower()
         assert "abort" in out or "traversal" in out, "import should be aborted"
         assert victim.read_text() == "ORIGINAL", "out-of-store file must be untouched"
         assert not (pass_dir / ".bashrc").exists()
@@ -78,7 +78,7 @@ class TestVaultImportContainment:
             patch("passclip.Prompt.ask", side_effect=[VAULT_PASSPHRASE]),
         ):
             cmd_import_vault(str(vault), force=True)
-        assert "abort" in capsys.readouterr().out.lower()
+        assert "abort" in capsys.readouterr().err.lower()
         assert not (tmp_path / ".gnupg").exists()
 
     def test_legitimate_member_still_restores(self, tmp_path):
@@ -107,7 +107,7 @@ class TestVaultImportContainment:
             patch("passclip.Prompt.ask", side_effect=[VAULT_PASSPHRASE]),
         ):
             cmd_import_vault(str(vault), force=True)
-        assert "abort" in capsys.readouterr().out.lower()
+        assert "abort" in capsys.readouterr().err.lower()
         assert not sibling.exists()
 
 

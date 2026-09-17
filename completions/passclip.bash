@@ -39,7 +39,7 @@ _passclip() {
             fi
             ;;
         config)
-            COMPREPLY=( $(compgen -W "clip_timeout default_password_length default_mode pass_dir" -- "$cur") )
+            COMPREPLY=( $(compgen -W "clip_timeout default_password_length pass_dir" -- "$cur") )
             ;;
         export-vault|import-vault)
             COMPREPLY=( $(compgen -f -- "$cur") )

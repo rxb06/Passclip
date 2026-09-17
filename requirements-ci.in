@@ -8,9 +8,12 @@ rich>=15.0
 cryptography>=50.0.0
 pyperclip>=1.11
 pyotp>=2.9
-credactor>=2.5
+credactor>=2.7.2
 # Build backend, pinned + hashed so `python -m build --no-isolation` never
 # pulls an unverified setuptools at release time (supply-chain: M7)
 setuptools>=83.0
 # Dependency CVE scanner, installed via this hashed lockfile like everything else (L12)
 pip-audit>=2.10
+# pip only gets here as a pip-api dependency; pinned forward past
+# GHSA-qwm4-qh6w-59xr, which affects everything below 26.2.0
+pip>=26.2
