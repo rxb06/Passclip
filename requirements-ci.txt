@@ -298,9 +298,9 @@ charset-normalizer==3.5.1 \
     --hash=sha256:fd0a274c0e5f9a21565cd9d3dd749b61f96b7aa1e20a93aa1ba4029518f2e5c0 \
     --hash=sha256:fdb8a068947befafba9952162645dc2fecaeb400e64584829ed5e9b2fbe21a7f
     # via requests
-credactor==2.7.2 \
-    --hash=sha256:8a56aeb52f04fc9a34f0147c491a8e3d88cce0df72e77b1e91dba55ae4324b4d \
-    --hash=sha256:de633fc202ae2513316906cabd67ce273f61e3fc115256d980263b6e5275bae0
+credactor==2.7.4 \
+    --hash=sha256:0eb7e1f6457a15c648a697304829f0398214bad52c36a1ee1f7a162fbf97e32e \
+    --hash=sha256:10dba91eabcf067e300edfb4349e41adb9b6e605b74f288dc7d9daab82ce53c3
     # via -r requirements-ci.in
 cryptography==50.0.1 \
     --hash=sha256:01f41478cf33fc605a6a089cd56d28b45c6c0b45a1928b61797f2621a04bac71 \
