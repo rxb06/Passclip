@@ -6,6 +6,17 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) conventions
 
 ---
 
+## [Unreleased]
+
+### Dependencies and tooling
+
+- `credactor` 2.7.4 → 2.7.5, a hardening release (report masking, CI gate exit codes, safer ingestion of external scanner reports). The pre-commit hook rev and the README and `docs/integration.md` snippets move with it.
+- The CI credential scan now runs Gitleaks 8.30.1 alongside Credactor. Gitleaks writes a JSON report to the runner temp directory and Credactor gates on its own findings plus the ingested ones (`--from-gitleaks`), still uploading one SARIF to Code Scanning. Gitleaks is installed from the release tarball and checked against a pinned SHA-256. `.gitleaks.toml` allowlists the fake `sk_live_abc123` Stripe key used in the docs, scoped to `docs/*.md`.
+- `ruff` 0.17.0 → 0.17.2 with the pre-commit hook rev moved to the matching commit; the `dev` extra floor goes to `ruff>=0.17` to match CI. `setuptools` 84.0.0 → 84.2.1, `pip` 26.2.1 → 26.2.2, and transitive pins (`certifi`, `charset-normalizer`, `filelock`, `iniconfig`, `msgpack`, `platformdirs`, `pluggy`, `pycparser`, `pyparsing`, `tomli`) regenerated in one resolution.
+- `actions/setup-python` 7.0.0 → 7.1.0, `github/codeql-action/upload-sarif` 4.38.3 → 4.39.1, `pypa/gh-action-pypi-publish` 1.14.2 → 1.14.3, all pinned to commit SHAs.
+
+---
+
 ## [1.5.0] — 2026-09-17
 
 Every finding from the September 2026 code review. The bulk of it is stopping routine operations from destroying secrets, and making failures visible to scripts instead of reporting success. **Read "Changed" before upgrading if you drive Passclip from a script** — error output, exit status and two behaviours have moved.
