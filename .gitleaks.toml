@@ -1,0 +1,10 @@
+# Gitleaks config for the CI credential-scan job. Gitleaks findings are fed into
+# credactor (--from-gitleaks), so anything allowlisted here never reaches the gate.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake Stripe key used as a placeholder in the docs"
+condition = "AND"
+paths = ['''^docs/.*\.md$''']
+regexes = ['''^sk_live_abc123''']

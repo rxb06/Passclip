@@ -15,7 +15,7 @@ If you use the [pre-commit](https://pre-commit.com/) framework, add this to your
 ```yaml
 repos:
   - repo: https://github.com/rxb06/Credactor
-    rev: v2.7.2
+    rev: v2.7.5
     hooks:
       - id: credactor
 ```
@@ -73,6 +73,17 @@ credential-scan:
 ```
 
 This fails the build if any hardcoded credentials are found. Use `--format sarif` and upload to GitHub Code Scanning for inline annotations on PRs.
+
+For wider coverage, run [Gitleaks](https://github.com/gitleaks/gitleaks) first and have Credactor gate on both result sets (Credactor 2.7+):
+
+```yaml
+    - name: Gitleaks scan
+      run: gitleaks dir . --exit-code 0 -f json -r "$RUNNER_TEMP/gitleaks.json"
+    - name: Scan for credentials (native + gitleaks)
+      run: credactor --ci --from-gitleaks "$RUNNER_TEMP/gitleaks.json" .
+```
+
+The Gitleaks report holds any secrets it found in plaintext, so keep it outside the checkout. Passclip's own `ci.yml` does this, with Gitleaks installed from a SHA-256 pinned release and placeholder values in the docs allowlisted in `.gitleaks.toml`.
 
 ---
 
