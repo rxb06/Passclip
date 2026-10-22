@@ -217,7 +217,7 @@ Passclip uses [Credactor](https://github.com/rxb06/Credactor) to scan for hardco
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/rxb06/Credactor
-    rev: v2.7.2
+    rev: v2.7.5
     hooks:
       - id: credactor
 ```
